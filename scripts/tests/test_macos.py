@@ -114,6 +114,22 @@ class MacBuildTests(unittest.TestCase):
         self.assertIn(str(app / "Contents/MacOS/vole-cli"), self.calls[-1])
         self.assertTrue(any(args[:2] == ["cargo", "test"] for args in self.calls))
 
+    def test_apple_clang_is_rejected_for_guest_c(self):
+        def apple_clang(args, environment, capture=False):
+            if args[0] == "rustc":
+                return "rustc 1.99.0\nhost: aarch64-apple-darwin\n"
+            if str(args[0]).endswith("clang"):
+                return "Apple clang version 17.0.0 (clang-1700.0.13.3)\n"
+            return ""
+
+        tools = dict(self.tools, clang=Path("/usr/bin/clang"))
+        with patch.object(macos.platform, "system", return_value="Darwin"), \
+             patch.object(macos, "require_tool", return_value=Path("/mock/tool")), \
+             patch.object(macos, "guest_tools", return_value=tools), \
+             patch.object(macos, "run", side_effect=apple_clang):
+            with self.assertRaisesRegex(RuntimeError, "Apple clang"):
+                macos.preflight({"PATH": ""})
+
     def test_native_host_guard_prevents_build_on_linux(self):
         with patch.object(macos.platform, "system", return_value="Linux"), patch.object(macos, "run") as run:
             with self.assertRaisesRegex(RuntimeError, "require macOS"):

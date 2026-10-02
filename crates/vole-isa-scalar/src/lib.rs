@@ -5,4 +5,4 @@ mod toolchain;
 
 pub use decode::decode;
 pub use machine::ScalarMachine;
-pub use toolchain::{assemble, toolchain_status};
+pub use toolchain::{assemble, linker_status, toolchain_status};

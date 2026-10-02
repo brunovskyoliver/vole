@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a native portable package with LLVM tools, notices and smoke evidence."""
+"""Create a native portable package with LLVM/Clang tools, notices and smoke evidence."""
 import argparse
 import hashlib
 import json
@@ -13,9 +13,17 @@ import subprocess
 import sys
 import tomllib
 import tarfile
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ("llvm-mc", "ld.lld", "llvm-objdump")
+TOOLS = ("llvm-mc", "ld.lld", "llvm-objdump", "clang")
+# Independently computed: 5! = 120 through a loop, a call and an array.
+C_SMOKE = """#include <vole.h>
+static int factorial(int n) { int result = 1; for (int i = 2; i <= n; i++) result *= i; return result; }
+int main(void) { int values[3] = {factorial(3), factorial(4), factorial(5)}; int *last = &values[2];
+    printf("Vole C %d %d\\n", values[0] + values[1], *last); return *last == 120 ? 0 : 1; }
+"""
+C_SMOKE_OUTPUT = "Vole C 30 120\n"
 GLIBC = re.compile(r"^(lib(c|m|dl|rt|pthread|resolv|util|anl)\.so\.|ld-linux|linux-vdso)")
 
 
@@ -181,6 +189,7 @@ def bundle_tools(folder, source_folder, notices, host):
                 external = [line.strip().split(" (", 1)[0] for line in lines if not line.strip().startswith(("/usr/lib/", "/System/Library/"))]
                 if external:
                     raise RuntimeError(f"{name} has non-system dylibs {external}; build the pinned static LLVM toolchain")
+    copy_resource_headers(executable("clang", source_folder), folder, version_records)
     if source_folder:
         for candidate in [source_folder / "licenses", source_folder.parent / "licenses"]:
             if candidate.is_dir():
@@ -195,12 +204,40 @@ def bundle_tools(folder, source_folder, notices, host):
     (notices / "toolchain-dependencies.json").write_text(json.dumps(dependencies, indent=2) + "\n")
 
 
+def copy_resource_headers(clang, folder, records):
+    """Bundle Clang's freestanding headers where the compiler looks beside the bundled clang."""
+    resource = Path(run([clang, "-print-resource-dir"]).strip())
+    headers = resource / "include"
+    if not (headers / "stddef.h").is_file():
+        raise RuntimeError(f"Clang resource headers are missing at {headers}")
+    destination = folder / "lib" / "clang" / resource.name / "include"
+    shutil.copytree(headers, destination, dirs_exist_ok=True)
+    records["clang-resource-headers"] = str(destination.relative_to(folder))
+
+
+def c_smoke(binary, folder, environment):
+    results = {}
+    with tempfile.TemporaryDirectory(prefix="vole-c-smoke-") as directory:
+        source = Path(directory) / "smoke.c"
+        source.write_text(C_SMOKE)
+        for target in ["arm64", "x64", "arm32", "x86"]:
+            state = json.loads(run([binary, "--arch", target, "--source", source, "--json"],
+                                   cwd=folder, env=environment, timeout=60))
+            output = bytes(state["output"]).decode()
+            if not state["halted"] or output != C_SMOKE_OUTPUT:
+                raise RuntimeError(f"Packaged C smoke on {target} printed {output!r}")
+            results[target] = {"halted": True, "steps": state["steps"], "output": output}
+    return results
+
+
 def smoke(binary, folder):
     # Tool discovery must use the package even when developer LLVM is on PATH.
     environment = os.environ.copy()
     environment.pop("VOLE_LLVM_MC", None)
     environment.pop("VOLE_LLD", None)
     environment.pop("VOLE_TOOLCHAIN_DIR", None)
+    environment.pop("VOLE_CLANG", None)
+    environment.pop("VOLE_CLANG_RESOURCE_DIR", None)
     environment["PATH"] = str(Path(sys.executable).parent) if os.name == "nt" else "/usr/bin:/bin"
     results = {}
     for target in ["vole", "arm32", "arm64", "x86", "x64"]:
@@ -217,6 +254,7 @@ def smoke(binary, folder):
         if region["bytes"][address - region["base"]] != 125:
             raise RuntimeError(f"Packaged {target} did not write 125 into main memory")
         results[target] = {"halted": True, "steps": state["steps"], "register": result_register, "result": 125, "memory_address": address}
+    results["c"] = c_smoke(binary, folder, environment)
     return results
 
 
@@ -268,7 +306,7 @@ def main():
         dependencies = {filename: run(["ldd", application / filename]) for filename in ["vole", "vole-cli"]}
         (notices / "application-dependencies.json").write_text(json.dumps(dependencies, indent=2) + "\n")
     shutil.copytree(ROOT / "examples", resources / "examples")
-    for filename in ["vole-spec.md", "isa-support.md", "native-verification.md"]:
+    for filename in ["vole-spec.md", "isa-support.md", "c-environment.md", "native-verification.md"]:
         copy(ROOT / "docs" / filename, resources / "help" / filename)
     if host == "linux":
         copy(ROOT / "packaging/linux.desktop", destination / "vole.desktop")
@@ -278,7 +316,7 @@ def main():
     results = {} if args.skip_smoke else smoke(application / ("vole-cli" + suffix), destination)
     if not args.skip_smoke:
         environment = os.environ.copy()
-        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR"]:
+        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR", "VOLE_CLANG", "VOLE_CLANG_RESOURCE_DIR"]:
             environment.pop(variable, None)
         run([sys.executable, ROOT / "scripts/verify-engines.py", "--binary", application / ("vole-cli" + suffix),
              "--output", resources / "engine-roundtrip-verification.json"], env=environment, timeout=180)

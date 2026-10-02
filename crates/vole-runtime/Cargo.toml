@@ -14,3 +14,7 @@ serde.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+vole-project.workspace = true
+tempfile = "3.27"

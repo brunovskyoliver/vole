@@ -1,5 +1,12 @@
 use capstone::prelude::*;
+use std::cell::RefCell;
 use vole_core::{Architecture, Instruction, SimError};
+
+thread_local! {
+    /// Capstone engines are expensive to build and not `Send`; keep one per
+    /// thread and architecture.
+    static ENGINES: RefCell<[Option<Capstone>; 4]> = const { RefCell::new([None, None, None, None]) };
+}
 
 pub(crate) fn engine(architecture: Architecture) -> Result<Capstone, SimError> {
     let engine = match architecture {
@@ -39,7 +46,29 @@ pub fn decode(
     address: u64,
     bytes: &[u8],
 ) -> Result<Instruction, SimError> {
-    decode_with(&engine(architecture)?, architecture, address, bytes)
+    let slot = match architecture {
+        Architecture::Arm32 => 0,
+        Architecture::Arm64 => 1,
+        Architecture::X86 => 2,
+        Architecture::X64 => 3,
+        Architecture::Vole => {
+            return Err(SimError(
+                "Use the VOLE decoder for 8-bit instructions".into(),
+            ));
+        }
+    };
+    ENGINES.with(|engines| {
+        let mut engines = engines.borrow_mut();
+        if engines[slot].is_none() {
+            engines[slot] = Some(engine(architecture)?);
+        }
+        decode_with(
+            engines[slot].as_ref().expect("initialized engine"),
+            architecture,
+            address,
+            bytes,
+        )
+    })
 }
 
 pub(crate) fn decode_with(

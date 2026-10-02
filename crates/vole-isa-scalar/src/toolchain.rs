@@ -61,6 +61,12 @@ fn tool_path(variable: &str, basename: &str) -> Option<PathBuf> {
     None
 }
 
+/// LLD alone, for pipelines such as C compilation that do not need LLVM MC.
+pub fn linker_status() -> Result<PathBuf, String> {
+    tool_path("VOLE_LLD", "ld.lld")
+        .ok_or_else(|| "LLD not found. Install LLD 14+ or set VOLE_LLD to ld.lld.".into())
+}
+
 pub fn toolchain_status() -> Result<(PathBuf, PathBuf), String> {
     Ok((
         tool_path("VOLE_LLVM_MC", "llvm-mc")

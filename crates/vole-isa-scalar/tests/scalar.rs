@@ -624,7 +624,9 @@ fn repeated_string_instructions_fault_promptly_and_state_is_unchanged() {
     machine.step().unwrap();
     let before = machine.snapshot();
     let start = std::time::Instant::now();
-    assert!(machine.step().unwrap_err().0.contains("Unsupported"));
+    // Repeated moves execute one element per step (interruptible, like hardware);
+    // the first element reads unmapped address 0 and faults without changes.
+    assert!(machine.step().unwrap_err().0.contains("Unmapped"));
     assert!(start.elapsed() < std::time::Duration::from_secs(1));
     assert_eq!(machine.snapshot(), before);
 }

@@ -9,6 +9,12 @@ pub const MUTED: u32 = 0xb2b9c4;
 pub const READ: u32 = 0x9cc8f4;
 pub const WRITE: u32 = 0xe4b48b;
 pub const ERROR: u32 = 0xefb0b2;
+/// C syntax colors. Read/Write stay reserved for keywords and literals the
+/// machine consumes; the rest are quiet tints that keep 4.5:1 on Workspace.
+pub const SYNTAX_TYPE: u32 = 0x93d0c8;
+pub const SYNTAX_STRING: u32 = 0xc0d69a;
+pub const SYNTAX_COMMENT: u32 = 0x8f9bad;
+pub const SYNTAX_PREPROCESSOR: u32 = 0xc8aee6;
 pub const MONO: &str = "IBM Plex Mono";
 pub const SANS: &str = "IBM Plex Sans";
 

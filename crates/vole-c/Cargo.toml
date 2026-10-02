@@ -7,6 +7,9 @@ publish.workspace = true
 [dependencies]
 vole-core.workspace = true
 vole-isa-scalar.workspace = true
+gimli = { version = "=0.32.3", default-features = false, features = ["read", "std"] }
+object = { version = "=0.37.3", default-features = false, features = ["read", "std", "elf"] }
+tempfile = "3.23"
 
 [lints]
 workspace = true

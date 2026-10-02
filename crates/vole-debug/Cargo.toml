@@ -9,3 +9,7 @@ vole-core.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+vole-isa-scalar.workspace = true
+vole-c.workspace = true

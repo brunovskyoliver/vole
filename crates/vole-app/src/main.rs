@@ -6,24 +6,27 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     input::{
         Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration,
-        RangeDecorationCollection, RangeDecorationStyle, TextDecoration, TextDecorationCollection,
+        RangeDecorationCollection, RangeDecorationStyle, TextDecorationCollection,
     },
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
 };
 use std::{
     borrow::Cow,
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     io::{Read, Write},
     path::PathBuf,
     sync::Arc,
     time::Duration,
 };
-use vole_core::{Architecture, Instruction};
+use vole_core::{Architecture, CompilerSettings, Instruction, Optimization, SourceLanguage};
 use vole_project::Project;
-use vole_runtime::{Command, RunState, Runtime, SessionView};
+use vole_runtime::{Command, RunState, Runtime, SessionView, SourceStep};
 
+mod cmodel;
+mod cpanels;
 mod inspect;
 mod prompts;
+mod syntax;
 mod theme;
 use theme::*;
 
@@ -33,6 +36,9 @@ actions!(
         Assemble,
         RunPause,
         Step,
+        StepOver,
+        StepInto,
+        StepOut,
         ReverseStep,
         Reset,
         Open,
@@ -56,8 +62,9 @@ actions!(
 
 #[derive(Clone, Copy, PartialEq)]
 enum CompactTab {
-    Assembly,
+    Source,
     Instructions,
+    Variables,
     Memory,
     Registers,
     Trace,
@@ -66,8 +73,24 @@ enum CompactTab {
 enum DiscardOperation {
     Open,
     Example,
+    Language(SourceLanguage),
     Close,
     Quit,
+}
+
+fn example_source(architecture: Architecture, language: SourceLanguage) -> String {
+    match language {
+        SourceLanguage::Assembly => architecture.example_source().to_string(),
+        SourceLanguage::C => vole_c::default_example().to_string(),
+    }
+}
+
+/// Scripted actions for screenshot verification without keyboard automation.
+#[derive(Clone, Copy, PartialEq)]
+enum Demo {
+    None,
+    Assembly,
+    C,
 }
 
 #[derive(Clone)]
@@ -78,7 +101,12 @@ enum EditTarget {
 
 struct DesktopSession {
     initial_architecture: Architecture,
-    demo_steps: u8,
+    initial_language: SourceLanguage,
+    initial_tab: Option<CompactTab>,
+    /// Document to open at startup (`--open`), read before the window appears.
+    initial_document: Option<PathBuf>,
+    initial_optimization: Optimization,
+    demo: Demo,
     workbench: Option<Entity<Workbench>>,
 }
 impl Global for DesktopSession {}
@@ -90,7 +118,9 @@ struct Workbench {
     address_input: Entity<InputState>,
     value_input: Entity<InputState>,
     pc_decoration: RangeDecorationCollection,
+    frame_decoration: RangeDecorationCollection,
     breakpoint_decoration: RangeDecorationCollection,
+    diagnostic_decoration: RangeDecorationCollection,
     syntax_decoration: TextDecorationCollection,
     last_source: String,
     last_window_title: String,
@@ -102,7 +132,25 @@ struct Workbench {
     pending_layout: Option<vole_project::Layout>,
     instruction_scroll: UniformListScrollHandle,
     architecture: Architecture,
+    language: SourceLanguage,
+    settings: CompilerSettings,
+    /// Machine code grouped by C line, rebuilt when the disassembly changes.
+    machine_layout: cmodel::MachineLayout,
+    selected_frame: usize,
+    /// C example chosen in the example menu; replaces the document after confirmation.
+    example_index: usize,
+    example_menu: bool,
+    /// Expanded variable rows, keyed by function and path.
+    expanded: BTreeSet<String>,
+    /// Breakpoint line whose resolution should be reported after the runtime answers.
+    pending_breakpoint_line: Option<usize>,
+    breakpoint_note: Option<String>,
+    revealed_line: Option<usize>,
+    output_len: usize,
+    output_scroll: ScrollHandle,
     selected: u64,
+    /// Bytes outlined from `selected`, e.g. the size of a variable shown in memory.
+    selection_len: u64,
     memory_base: u64,
     edit_target: EditTarget,
     edit_width: usize,
@@ -114,17 +162,94 @@ struct Workbench {
     edit_error: Option<String>,
     zoom: f32,
     last_editor_line: u32,
-    demo_remaining: u8,
+    demo: VecDeque<Command>,
+    demo_after: Option<std::time::Instant>,
     _subscriptions: Vec<Subscription>,
     _poll: Task<()>,
 }
 
 impl Workbench {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let architecture = cx.global::<DesktopSession>().initial_architecture;
-        let demo_remaining = cx.global::<DesktopSession>().demo_steps;
-        let source = architecture.example_source().to_string();
+        let session = cx.global::<DesktopSession>();
+        let architecture = session.initial_architecture;
+        let language = if architecture == Architecture::Vole {
+            SourceLanguage::Assembly
+        } else {
+            session.initial_language
+        };
+        let mut settings = CompilerSettings {
+            optimization: session.initial_optimization,
+            ..CompilerSettings::default()
+        };
+        let mut source = example_source(architecture, language);
+        let (mut architecture, mut language) = (architecture, language);
+        let mut document = None;
+        let mut open_error = None;
+        if let Some(path) = session.initial_document.clone() {
+            match load_document(path, architecture, language) {
+                Ok(loaded) => {
+                    architecture = loaded.architecture;
+                    language = loaded.language;
+                    settings = loaded.settings.clone();
+                    source = loaded.source.clone();
+                    document = Some(loaded);
+                }
+                Err(error) => open_error = Some(format!("Could not open file: {error}")),
+            }
+        }
+        let demo: VecDeque<Command> = match session.demo {
+            Demo::None => VecDeque::new(),
+            Demo::Assembly => [Command::Step, Command::Step].into(),
+            Demo::C => {
+                let call_line = source
+                    .lines()
+                    .position(|line| line.contains("total += values[i]"))
+                    .map_or(1, |index| index + 1);
+                [
+                    Command::ToggleSourceBreakpoint(call_line),
+                    Command::Run,
+                    Command::SourceStep(SourceStep::Into),
+                    Command::SourceStep(SourceStep::Over),
+                ]
+                .into()
+            }
+        };
+        let compact_tab = session.initial_tab.unwrap_or(CompactTab::Source);
         let runtime = Runtime::new(architecture, source.clone());
+        let mut file_path = None;
+        let mut pending_layout = None;
+        let mut memory_base = if architecture == Architecture::Vole {
+            0
+        } else {
+            0x1000
+        };
+        if let Some(document) = document {
+            file_path = document.path;
+            pending_layout = document.layout;
+            if let Some(program) = document.program {
+                memory_base = program.entry & !0xff;
+                let _ = runtime.send(Command::Restore {
+                    program,
+                    snapshot: document.snapshot,
+                });
+            } else if language == SourceLanguage::C {
+                let _ = runtime.send(Command::Build {
+                    architecture,
+                    language,
+                    source: source.clone(),
+                    settings: settings.clone(),
+                });
+            }
+            let _ = runtime.send(Command::SetBreakpoints(document.breakpoints));
+            let _ = runtime.send(Command::SetSourceBreakpoints(document.source_breakpoints));
+        } else if language == SourceLanguage::C {
+            let _ = runtime.send(Command::Build {
+                architecture,
+                language,
+                source: source.clone(),
+                settings: settings.clone(),
+            });
+        }
         let view = runtime.view();
         let editor = cx.new(|cx| {
             EditorState::new(window, cx)
@@ -132,7 +257,7 @@ impl Workbench {
                 .line_number(true)
                 .soft_wrap(false)
                 .default_value(source.clone())
-                .placeholder("Write assembly, then choose Assemble.")
+                .placeholder("Write a program, then build it.")
         });
         let address_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -147,11 +272,17 @@ impl Workbench {
         let pc_decoration = editor.update(cx, |state, cx| {
             state.create_range_decorations_collection(Vec::new(), cx)
         });
+        let frame_decoration = editor.update(cx, |state, cx| {
+            state.create_range_decorations_collection(Vec::new(), cx)
+        });
         let breakpoint_decoration = editor.update(cx, |state, cx| {
             state.create_range_decorations_collection(Vec::new(), cx)
         });
+        let diagnostic_decoration = editor.update(cx, |state, cx| {
+            state.create_range_decorations_collection(Vec::new(), cx)
+        });
         let syntax_decoration = editor.update(cx, |state, cx| {
-            state.create_decorations_collection(syntax_tokens(&source), cx)
+            state.create_decorations_collection(syntax::tokens(language, &source), cx)
         });
         let poll = cx.spawn(async move |this, cx| {
             loop {
@@ -170,7 +301,9 @@ impl Workbench {
             address_input,
             value_input,
             pc_decoration,
+            frame_decoration,
             breakpoint_decoration,
+            diagnostic_decoration,
             syntax_decoration,
             last_source: source.clone(),
             last_window_title: String::new(),
@@ -179,19 +312,24 @@ impl Workbench {
             split_main: cx.new(|_| ResizableState::default()),
             split_source: cx.new(|_| ResizableState::default()),
             split_vertical: cx.new(|_| ResizableState::default()),
-            pending_layout: None,
+            pending_layout,
             instruction_scroll: UniformListScrollHandle::new(),
             architecture,
-            selected: if architecture == Architecture::Vole {
-                0
-            } else {
-                0x1000
-            },
-            memory_base: if architecture == Architecture::Vole {
-                0
-            } else {
-                0x1000
-            },
+            language,
+            settings,
+            machine_layout: cmodel::MachineLayout::default(),
+            selected_frame: 0,
+            example_index: 0,
+            example_menu: false,
+            expanded: BTreeSet::new(),
+            pending_breakpoint_line: None,
+            breakpoint_note: None,
+            revealed_line: None,
+            output_len: 0,
+            output_scroll: ScrollHandle::new(),
+            selected: memory_base,
+            selection_len: 1,
+            memory_base,
             edit_target: EditTarget::Memory(if architecture == Architecture::Vole {
                 0
             } else {
@@ -200,13 +338,14 @@ impl Workbench {
             edit_width: 1,
             little_endian: true,
             architecture_menu: false,
-            compact_tab: CompactTab::Assembly,
-            file_path: None,
+            compact_tab,
+            file_path,
             saved_source: source,
-            edit_error: None,
+            edit_error: open_error,
             zoom: 1.0,
             last_editor_line: 0,
-            demo_remaining,
+            demo,
+            demo_after: None,
             _subscriptions: Vec::new(),
             _poll: poll,
         }
@@ -220,7 +359,8 @@ impl Workbench {
                     let source = editor.read(cx).value().to_string();
                     if source != this.last_source {
                         this.last_source = source.clone();
-                        this.syntax_decoration.set(syntax_tokens(&source), cx);
+                        this.syntax_decoration
+                            .set(syntax::tokens(this.language, &source), cx);
                         this.send(Command::MarkStale(source), cx);
                     }
                 }
@@ -255,12 +395,49 @@ impl Workbench {
 
     fn refresh(&mut self, cx: &mut Context<Self>) {
         let next = self.runtime.view();
-        if next.revision != self.view.revision {
+        // Every publish replaces the shared view, including commands that do not
+        // bump the revision (for example source breakpoint toggles).
+        if !Arc::ptr_eq(&next, &self.view) {
             let old_pc = self.view.snapshot.as_ref().map(|s| s.pc);
             let new_pc = next.snapshot.as_ref().map(|s| s.pc);
+            let breakpoints_changed = next.source_breakpoints != self.view.source_breakpoints;
             self.view = next;
             self.architecture = self.view.architecture;
+            let layout = if self.image_matches() {
+                cmodel::MachineLayout::new(
+                    &self.view.disassembly,
+                    self.view.program.as_ref().and_then(|p| p.debug.as_ref()),
+                )
+            } else {
+                cmodel::MachineLayout::default()
+            };
+            if layout != self.machine_layout {
+                self.machine_layout = layout;
+            }
+            if old_pc != new_pc
+                || self
+                    .view
+                    .debug
+                    .as_ref()
+                    .is_none_or(|d| self.selected_frame >= d.frames.len())
+            {
+                self.selected_frame = 0;
+            }
+            if breakpoints_changed {
+                self.report_breakpoint();
+            }
             self.update_source_decorations(cx);
+            if let Some(line) = self.current_line()
+                && Some(line) != self.revealed_line
+            {
+                self.scroll_editor_to(line, cx);
+            }
+            self.revealed_line = self.current_line();
+            let output_len = self.view.snapshot.as_ref().map_or(0, |s| s.output.len());
+            if output_len != self.output_len {
+                self.output_len = output_len;
+                self.output_scroll.scroll_to_bottom();
+            }
             let input = self.value_input.clone();
             let text = self.edit_value_text();
             if let Some(handle) = cx.windows().first().copied() {
@@ -274,18 +451,46 @@ impl Workbench {
                 && let Some(pc) = new_pc
                 && let Some(index) = self.view.disassembly.iter().position(|i| i.address == pc)
             {
+                let row = if self.language == SourceLanguage::C {
+                    self.machine_layout
+                        .group_of_instruction(index)
+                        .and_then(|group| {
+                            self.machine_layout
+                                .rows
+                                .iter()
+                                .position(|row| *row == cmodel::MachineRow::Header(group))
+                        })
+                        .unwrap_or(index)
+                } else {
+                    index
+                };
                 self.instruction_scroll
-                    .scroll_to_item(index, ScrollStrategy::Center);
-            }
-            if self.demo_remaining > 0 && self.can_execute() {
-                self.demo_remaining -= 1;
-                self.send(Command::Step, cx);
+                    .scroll_to_item(row, ScrollStrategy::Center);
             }
             cx.notify();
+        }
+        if !self.demo.is_empty()
+            && self.can_execute()
+            && !self.view.dirty
+            && self
+                .demo_after
+                .is_none_or(|after| after.elapsed() > Duration::from_millis(600))
+            && let Some(command) = self.demo.pop_front()
+        {
+            self.demo_after = Some(std::time::Instant::now());
+            self.send(command, cx);
         }
         let cursor_line = self.editor.read(cx).cursor_position().line;
         if cursor_line != self.last_editor_line {
             self.last_editor_line = cursor_line;
+            if self.language == SourceLanguage::C
+                && let Some(row) = self
+                    .machine_layout
+                    .first_header_for_line(cursor_line as usize + 1)
+            {
+                self.instruction_scroll
+                    .scroll_to_item(row, ScrollStrategy::Nearest);
+            }
             if let Some(instruction) = self
                 .view
                 .disassembly
@@ -294,6 +499,9 @@ impl Workbench {
             {
                 let address = instruction.address;
                 self.selected = address;
+                self.selection_len = 1;
+                cx.notify();
+            } else if self.language == SourceLanguage::C {
                 cx.notify();
             }
         }
@@ -302,7 +510,7 @@ impl Workbench {
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("Untitled.{}", self.architecture.id()));
+            .unwrap_or_else(|| self.untitled_name());
         let changed = self.editor.read(cx).value().as_ref() != self.saved_source;
         let title = format!("{}{} | Vole", name, if changed { " *" } else { "" });
         if title != self.last_window_title
@@ -337,15 +545,18 @@ impl Workbench {
                 })
         };
         let current = self
-            .view
-            .current_instruction
-            .as_ref()
-            .and_then(|i| i.source_line)
-            .and_then(|l| decoration(l, rgba(0x9cc8f427).into()))
+            .current_line()
+            .and_then(|l| decoration(l, rgba(0x9cc8f42e).into()))
             .into_iter()
             .collect();
         self.pc_decoration.set(current, cx);
-        let breakpoints = self
+        let frame = self
+            .selected_frame_line()
+            .and_then(|l| decoration(l, rgba(0x6a7f9c55).into()))
+            .into_iter()
+            .collect();
+        self.frame_decoration.set(frame, cx);
+        let mut breakpoints: Vec<_> = self
             .view
             .disassembly
             .iter()
@@ -355,11 +566,124 @@ impl Workbench {
                     .and_then(|line| decoration(line, rgba(0xe4b48b24).into()))
             })
             .collect();
+        if self.language == SourceLanguage::C {
+            // The PC fill wins on a shared line; mixing both tints reads as neither.
+            let current = self.current_line();
+            breakpoints.extend(
+                self.view
+                    .source_breakpoints
+                    .keys()
+                    .filter(|line| Some(**line) != current)
+                    .filter_map(|line| decoration(*line, rgba(0xe4b48b2e).into())),
+            );
+        }
         self.breakpoint_decoration.set(breakpoints, cx);
+        let diagnostics = self
+            .view
+            .diagnostics
+            .iter()
+            .filter(|d| d.is_error())
+            .filter_map(|d| decoration(d.line, rgba(0xefb0b222).into()))
+            .collect();
+        self.diagnostic_decoration.set(diagnostics, cx);
     }
-
+    /// Line containing the PC: the debugger's user location for C, otherwise the
+    /// current instruction's source line.
+    fn current_line(&self) -> Option<usize> {
+        if !self.image_matches() {
+            return None;
+        }
+        if self.language == SourceLanguage::C {
+            return self
+                .view
+                .debug
+                .as_ref()?
+                .location
+                .as_ref()
+                .filter(|l| l.user)
+                .map(|l| l.line as usize);
+        }
+        self.view
+            .current_instruction
+            .as_ref()
+            .and_then(|i| i.source_line)
+    }
+    /// Line of a selected caller frame, shown with a quieter tint than the PC line.
+    fn selected_frame_line(&self) -> Option<usize> {
+        if self.selected_frame == 0 {
+            return None;
+        }
+        self.view
+            .debug
+            .as_ref()?
+            .frames
+            .get(self.selected_frame)?
+            .location
+            .as_ref()
+            .filter(|l| l.user)
+            .map(|l| l.line as usize)
+    }
+    /// Scroll the editor so a 1-based line is visible without moving the cursor
+    /// or focus; the debugger shows where it is, the user keeps their place.
+    fn scroll_editor_to(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.editor.update(cx, |state, cx| {
+            let (Some(range), Some(height)) = (state.visible_row_range(), state.line_height())
+            else {
+                return;
+            };
+            let row = line.saturating_sub(1);
+            if row > range.start && row + 1 < range.end {
+                return;
+            }
+            let rows = range.end.saturating_sub(range.start).max(1);
+            let top = row.saturating_sub(rows / 3);
+            let offset = state.scroll_offset();
+            state.set_scroll_offset(point(offset.x, -(height * top as f32)), cx);
+        });
+    }
+    fn report_breakpoint(&mut self) {
+        let Some(line) = self.pending_breakpoint_line else {
+            return;
+        };
+        let built = self.view.program.is_some() && !self.view.dirty;
+        self.breakpoint_note = Some(match self.view.source_breakpoints.get(&line) {
+            None => format!("Removed the breakpoint on line {line}."),
+            Some(_) if !built => {
+                format!("Breakpoint on line {line}. It resolves to machine code after Compile.")
+            }
+            Some(breakpoint) => match (breakpoint.resolved_line, breakpoint.address) {
+                (_, None) => {
+                    format!("Line {line} has no code after it, so this breakpoint cannot stop.")
+                }
+                (Some(resolved), Some(address)) if resolved != line => format!(
+                    "Line {line} has no code. The breakpoint stops at line {resolved}, {}.",
+                    cmodel::hex_address(address)
+                ),
+                (_, Some(address)) => format!(
+                    "Breakpoint on line {line} stops before {}.",
+                    cmodel::hex_address(address)
+                ),
+            },
+        });
+        self.pending_breakpoint_line = None;
+    }
+    /// False while the loaded image was built from the other document language,
+    /// e.g. just after switching to C and before the first compile finishes.
+    fn image_matches(&self) -> bool {
+        self.view
+            .program
+            .as_ref()
+            .is_some_and(|p| p.language == self.language)
+    }
+    fn untitled_name(&self) -> String {
+        match self.language {
+            SourceLanguage::C => "Untitled.c".into(),
+            SourceLanguage::Assembly => format!("Untitled.{}", self.architecture.id()),
+        }
+    }
     fn can_execute(&self) -> bool {
         self.view.snapshot.is_some()
+            && self.image_matches()
             && !matches!(
                 self.view.state,
                 RunState::Editing
@@ -379,15 +703,22 @@ impl Workbench {
     fn source(&self, cx: &App) -> String {
         self.editor.read(cx).value().to_string()
     }
+    fn build_command(&self, source: String) -> Command {
+        Command::Build {
+            architecture: self.architecture,
+            language: self.language,
+            source,
+            settings: self.settings.clone(),
+        }
+    }
     fn assemble(&mut self, _: &Assemble, _: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.view.state, RunState::Running | RunState::Assembling) {
+            return;
+        }
         self.edit_error = None;
-        self.send(
-            Command::Assemble {
-                architecture: self.architecture,
-                source: self.source(cx),
-            },
-            cx,
-        );
+        self.breakpoint_note = None;
+        let command = self.build_command(self.source(cx));
+        self.send(command, cx);
     }
     fn run_pause(&mut self, _: &RunPause, _: &mut Window, cx: &mut Context<Self>) {
         if self.view.state == RunState::Running {
@@ -398,8 +729,25 @@ impl Workbench {
     }
     fn step(&mut self, _: &Step, _: &mut Window, cx: &mut Context<Self>) {
         if self.can_execute() {
+            self.edit_error = None;
             self.send(Command::Step, cx);
         }
+    }
+    fn source_step(&mut self, step: SourceStep, cx: &mut Context<Self>) {
+        if self.language == SourceLanguage::C && self.can_execute() {
+            self.edit_error = None;
+            self.breakpoint_note = None;
+            self.send(Command::SourceStep(step), cx);
+        }
+    }
+    fn step_over(&mut self, _: &StepOver, _: &mut Window, cx: &mut Context<Self>) {
+        self.source_step(SourceStep::Over, cx);
+    }
+    fn step_into(&mut self, _: &StepInto, _: &mut Window, cx: &mut Context<Self>) {
+        self.source_step(SourceStep::Into, cx);
+    }
+    fn step_out(&mut self, _: &StepOut, _: &mut Window, cx: &mut Context<Self>) {
+        self.source_step(SourceStep::Out, cx);
     }
     fn reverse(&mut self, _: &ReverseStep, _: &mut Window, cx: &mut Context<Self>) {
         if self.paused() {
@@ -413,6 +761,10 @@ impl Workbench {
     }
     fn toggle_breakpoint(&mut self, _: &ToggleBreakpoint, _: &mut Window, cx: &mut Context<Self>) {
         let line = self.editor.read(cx).cursor_position().line as usize + 1;
+        if self.language == SourceLanguage::C {
+            self.toggle_source_breakpoint(line, cx);
+            return;
+        }
         let address = self
             .view
             .disassembly
@@ -422,6 +774,18 @@ impl Workbench {
             .unwrap_or(self.selected);
         self.send(Command::ToggleBreakpoint(address), cx);
     }
+    fn toggle_source_breakpoint(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.pending_breakpoint_line = Some(line);
+        self.send(Command::ToggleSourceBreakpoint(line), cx);
+    }
+    fn choose_example(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.example_menu = false;
+        self.example_index = index;
+        if !self.confirm_discard(DiscardOperation::Example, window, cx) {
+            self.replace_with_example(window, cx);
+        }
+        cx.notify();
+    }
     fn load_example(&mut self, _: &LoadExample, window: &mut Window, cx: &mut Context<Self>) {
         if self.confirm_discard(DiscardOperation::Example, window, cx) {
             return;
@@ -429,12 +793,22 @@ impl Workbench {
         self.replace_with_example(window, cx);
     }
     fn replace_with_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let source = self.architecture.example_source().to_string();
+        let source = match self.language {
+            SourceLanguage::C => vole_c::EXAMPLES
+                .get(self.example_index)
+                .map_or_else(|| vole_c::default_example(), |(_, source)| source)
+                .to_string(),
+            SourceLanguage::Assembly => example_source(self.architecture, self.language),
+        };
         self.last_source = source.clone();
         self.editor.update(cx, |editor, cx| {
             editor.set_value(source.clone(), window, cx)
         });
-        self.syntax_decoration.set(syntax_tokens(&source), cx);
+        self.syntax_decoration
+            .set(syntax::tokens(self.language, &source), cx);
+        self.edit_error = None;
+        self.breakpoint_note = None;
+        self.expanded.clear();
         self.file_path = None;
         self.saved_source = source.clone();
         self.selected = if self.architecture == Architecture::Vole {
@@ -444,13 +818,55 @@ impl Workbench {
         };
         self.memory_base = self.selected;
         self.send(Command::SetBreakpoints(BTreeSet::new()), cx);
-        self.send(
-            Command::Assemble {
-                architecture: self.architecture,
-                source,
-            },
-            cx,
-        );
+        self.send(Command::SetSourceBreakpoints(BTreeSet::new()), cx);
+        let command = self.build_command(source);
+        self.send(command, cx);
+    }
+    /// Switch the document language. The current document is replaced by that
+    /// language's example, after confirming unsaved changes.
+    fn choose_language(
+        &mut self,
+        language: SourceLanguage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if language == self.language
+            || language == SourceLanguage::C && self.architecture == Architecture::Vole
+            || self.view.state == RunState::Running
+        {
+            return;
+        }
+        if self.confirm_discard(DiscardOperation::Language(language), window, cx) {
+            return;
+        }
+        self.apply_language(language, window, cx);
+    }
+    fn apply_language(
+        &mut self,
+        language: SourceLanguage,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.language = language;
+        self.example_index = 0;
+        self.selected_frame = 0;
+        self.machine_layout = cmodel::MachineLayout::default();
+        if language == SourceLanguage::Assembly && self.compact_tab == CompactTab::Variables {
+            self.compact_tab = CompactTab::Source;
+        }
+        self.replace_with_example(window, cx);
+    }
+    fn set_optimization(&mut self, optimization: Optimization, cx: &mut Context<Self>) {
+        if self.settings.optimization == optimization {
+            cx.notify();
+            return;
+        }
+        self.settings.optimization = optimization;
+        if self.view.state != RunState::Running {
+            let command = self.build_command(self.source(cx));
+            self.send(command, cx);
+        }
+        cx.notify();
     }
     fn choose_architecture(
         &mut self,
@@ -463,16 +879,14 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if architecture == Architecture::Vole && self.language == SourceLanguage::C {
+            return;
+        }
         self.architecture = architecture;
         self.architecture_menu = false;
         // Keep source when changing a target. The user chooses whether to load its example.
-        self.send(
-            Command::Assemble {
-                architecture,
-                source: self.source(cx),
-            },
-            cx,
-        );
+        let command = self.build_command(self.source(cx));
+        self.send(command, cx);
         self.memory_base = if architecture == Architecture::Vole {
             0
         } else {
@@ -493,6 +907,12 @@ impl Workbench {
     }
     fn select_instruction(&mut self, address: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = address;
+        self.selection_len = self
+            .view
+            .disassembly
+            .iter()
+            .find(|i| i.address == address)
+            .map_or(1, |i| i.bytes.len().max(1) as u64);
         self.memory_base = address & !0xff;
         self.edit_target = EditTarget::Memory(address);
         self.set_edit_value(window, cx);
@@ -513,8 +933,77 @@ impl Workbench {
         }
         cx.notify();
     }
+    /// Show a variable's bytes: page to its address, outline its whole size and
+    /// inspect it at its natural width when that is an integer width.
+    fn show_in_memory(
+        &mut self,
+        address: u64,
+        size: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.memory_base = address & !0xff;
+        self.selected = address;
+        self.selection_len = size.clamp(1, 256);
+        self.edit_target = EditTarget::Memory(address);
+        self.edit_width = match size {
+            1 | 2 | 4 | 8 => size as usize,
+            _ => 1,
+        };
+        self.edit_error = None;
+        if self.compact_tab == CompactTab::Variables {
+            self.compact_tab = CompactTab::Memory;
+        }
+        self.set_edit_value(window, cx);
+        cx.notify();
+    }
+    fn show_register(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let bits = self
+            .view
+            .snapshot
+            .as_ref()
+            .and_then(|s| {
+                s.registers
+                    .iter()
+                    .find(|r| r.name.eq_ignore_ascii_case(&name))
+                    .map(|r| r.bits)
+            })
+            .unwrap_or(self.architecture.bits());
+        self.edit_target = EditTarget::Register(name, bits);
+        self.edit_error = None;
+        if self.compact_tab == CompactTab::Variables {
+            self.compact_tab = CompactTab::Registers;
+        }
+        self.set_edit_value(window, cx);
+        cx.notify();
+    }
+    /// Move the editor cursor to a 1-based line and column and focus the editor.
+    fn reveal_line(
+        &mut self,
+        line: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.compact_tab != CompactTab::Source {
+            self.compact_tab = CompactTab::Source;
+        }
+        self.editor.update(cx, |state, cx| {
+            state.set_cursor_position(
+                Position::new(
+                    line.saturating_sub(1) as u32,
+                    column.saturating_sub(1) as u32,
+                ),
+                window,
+                cx,
+            );
+            state.focus(window, cx);
+        });
+        cx.notify();
+    }
     fn select_memory(&mut self, address: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = address;
+        self.selection_len = 1;
         self.edit_target = EditTarget::Memory(address);
         self.edit_width = 1;
         self.edit_error = None;
@@ -673,7 +1162,11 @@ impl Workbench {
         }
         let confirm = window.prompt(
             PromptLevel::Warning,
-            "Discard unsaved assembly changes?",
+            if self.language == SourceLanguage::C {
+                "Discard unsaved C changes?"
+            } else {
+                "Discard unsaved assembly changes?"
+            },
             Some("Save your current document first if you want to keep these changes."),
             &["Cancel", "Discard changes"],
             cx,
@@ -683,6 +1176,9 @@ impl Workbench {
                 let _ = this.update_in(cx, |this, window, cx| match operation {
                     DiscardOperation::Open => this.open_file(cx),
                     DiscardOperation::Example => this.replace_with_example(window, cx),
+                    DiscardOperation::Language(language) => {
+                        this.apply_language(language, window, cx)
+                    }
                     DiscardOperation::Close => window.remove_window(),
                     DiscardOperation::Quit => cx.quit(),
                 });
@@ -710,57 +1206,92 @@ impl Workbench {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Open assembly, .voleproject, .bin or .hex".into()),
+            prompt: Some("Open C, assembly, .voleproject, .bin or .hex".into()),
         });
         let architecture = self.architecture;
-        cx.spawn(async move|this,cx|{
-            let path=match picker.await{Ok(Ok(Some(mut paths)))=>paths.pop(),Ok(Ok(None))=>None,other=>{let _=this.update(cx,|this,cx|{this.edit_error=Some(format!("Native file picker failed: {other:?}"));cx.notify();});None}};
-            let Some(path)=path else{return;};
-            let loaded=cx.background_executor().spawn(async move{
-                let extension=path.extension().and_then(|e|e.to_str()).unwrap_or("").to_ascii_lowercase();
-                if extension=="voleproject"||extension=="json"{
-                    let p=Project::open(&path)?;
-                    if let Some(image)=p.image.as_ref(){
-                        let mut validation=vole_runtime::Session::new(p.architecture,p.source.clone());
-                        validation.apply(Command::Restore{program:image.clone(),snapshot:p.snapshot.clone()})?;
-                    }
-                    return Ok((Some(path),p.architecture,p.source,p.breakpoints,Some(p.layout),p.image,p.snapshot));
+        let language = self.language;
+        cx.spawn(async move |this, cx| {
+            let path = match picker.await {
+                Ok(Ok(Some(mut paths))) => paths.pop(),
+                Ok(Ok(None)) => None,
+                other => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.edit_error = Some(format!("Native file picker failed: {other:?}"));
+                        cx.notify();
+                    });
+                    None
                 }
-                let file=std::fs::File::open(&path).map_err(|e|vole_core::SimError(e.to_string()))?;
-                let mut bytes=Vec::new();file.take(1024*1024+1).read_to_end(&mut bytes).map_err(|e|vole_core::SimError(e.to_string()))?;
-                if bytes.len()>1024*1024{return Err(vole_core::SimError("File exceeds the 1 MiB limit.".into()));}
-                if extension=="bin"||extension=="prg"||extension=="hex"{
-                    let image=if extension=="hex"{
-                        let text=String::from_utf8(bytes).map_err(|_|vole_core::SimError("Hex file must be UTF-8 text with pairs of hexadecimal digits.".into()))?;
-                        let compact=text.split_whitespace().collect::<String>();
-                        if compact.len()%2!=0||!compact.is_ascii(){return Err(vole_core::SimError("Hex file must contain complete byte pairs.".into()));}
-                        (0..compact.len()).step_by(2).map(|i|u8::from_str_radix(&compact[i..i+2],16).map_err(|_|vole_core::SimError("Invalid hexadecimal byte.".into()))).collect::<Result<Vec<_>,_>>()?
-                    }else{bytes};
-                    let program=vole_runtime::import_bytes(architecture,&image)?;
-                    Ok((None,architecture,program.source.clone(),BTreeSet::new(),None,Some(program),None))
-                }else{
-                    let source=String::from_utf8(bytes).map_err(|_|vole_core::SimError("Assembly files must contain UTF-8 text. Open binary images with a .bin extension.".into()))?;
-                    Ok((Some(path),architecture,source,BTreeSet::new(),None,None,None))
+            };
+            let Some(path) = path else {
+                return;
+            };
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { load_document(path, architecture, language) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match loaded {
+                    Ok(document) => this.apply_document(document, cx),
+                    Err(error) => this.edit_error = Some(format!("Could not open file: {error}")),
                 }
-            }).await;
-            let _=this.update(cx,|this,cx|{
-                match loaded{
-                    Ok((path,architecture,source,breakpoints,layout,program,snapshot))=>{
-                        this.architecture=architecture;this.saved_source=source.clone();this.last_source=source.clone();this.file_path=path;this.edit_error=None;
-                        this.memory_base=program.as_ref().map(|p|p.entry&!0xff).unwrap_or(if architecture==Architecture::Vole{0}else{0x1000});this.selected=this.memory_base;
-                        let editor=this.editor.clone();let replacement=source.clone();
-                        this.pending_layout=layout;
-                        if let Some(handle)=cx.windows().first().copied(){let _=handle.update(cx,|_,window,cx|{
-                            editor.update(cx,|state,cx|state.set_value(replacement,window,cx));
-                        });}
-                        this.syntax_decoration.set(syntax_tokens(&source),cx);
-                        if let Some(program)=program{this.send(Command::Restore{program,snapshot},cx);}else{this.send(Command::Assemble{architecture,source},cx);}
-                        this.send(Command::SetBreakpoints(breakpoints),cx);
-                    }
-                    Err(error)=>this.edit_error=Some(format!("Could not open file: {error}")),
-                }cx.notify();
+                cx.notify();
             });
-        }).detach();
+        })
+        .detach();
+    }
+    fn apply_document(&mut self, document: LoadedDocument, cx: &mut Context<Self>) {
+        let LoadedDocument {
+            path,
+            architecture,
+            language,
+            settings,
+            source,
+            breakpoints,
+            source_breakpoints,
+            layout,
+            program,
+            snapshot,
+        } = document;
+        self.architecture = architecture;
+        self.language = language;
+        self.settings = settings;
+        self.selected_frame = 0;
+        self.expanded.clear();
+        self.breakpoint_note = None;
+        if language == SourceLanguage::Assembly && self.compact_tab == CompactTab::Variables {
+            self.compact_tab = CompactTab::Source;
+        }
+        self.saved_source = source.clone();
+        self.last_source = source.clone();
+        self.file_path = path;
+        self.edit_error = None;
+        self.memory_base = program.as_ref().map(|p| p.entry & !0xff).unwrap_or(
+            if architecture == Architecture::Vole {
+                0
+            } else {
+                0x1000
+            },
+        );
+        self.selected = self.memory_base;
+        self.selection_len = 1;
+        let editor = self.editor.clone();
+        let replacement = source.clone();
+        self.pending_layout = layout;
+        if let Some(handle) = cx.windows().first().copied() {
+            let _ = handle.update(cx, |_, window, cx| {
+                editor.update(cx, |state, cx| state.set_value(replacement, window, cx));
+            });
+        }
+        self.syntax_decoration
+            .set(syntax::tokens(language, &source), cx);
+        if let Some(program) = program {
+            self.send(Command::Restore { program, snapshot }, cx);
+        } else {
+            let command = self.build_command(source);
+            self.send(command, cx);
+        }
+        self.send(Command::SetBreakpoints(breakpoints), cx);
+        self.send(Command::SetSourceBreakpoints(source_breakpoints), cx);
     }
     fn export_bytes(&mut self, _: &ExportBytes, _: &mut Window, cx: &mut Context<Self>) {
         let Some(program) = self.view.program.clone() else {
@@ -807,17 +1338,23 @@ impl Workbench {
         self.save_document(true, window, cx);
     }
     fn save_document(&mut self, force_picker: bool, _: &mut Window, cx: &mut Context<Self>) {
-        let mut project = Project::new(self.architecture, self.source(cx));
+        let mut project = match self.language {
+            SourceLanguage::Assembly => Project::new(self.architecture, self.source(cx)),
+            SourceLanguage::C => {
+                let mut project =
+                    Project::new_c(self.architecture, self.source(cx), self.settings.clone());
+                project.source_breakpoints = self.view.source_breakpoints.keys().copied().collect();
+                project
+            }
+        };
         if self.view.architecture == self.architecture {
             project.breakpoints = self.view.breakpoints.clone();
         }
         if !self.view.dirty
             && self.view.source == project.source
-            && self
-                .view
-                .program
-                .as_ref()
-                .is_some_and(|image| image.source == project.source)
+            && self.view.program.as_ref().is_some_and(|image| {
+                image.source == project.source && image.language == project.language
+            })
         {
             project.image = self.view.program.clone();
             project.snapshot = self.view.snapshot.clone();
@@ -913,13 +1450,25 @@ impl Workbench {
         if window.has_active_prompt() {
             return;
         }
-        let detail="Assemble: Ctrl/Command+Enter. Run or pause: F5. Step: F10. Reverse: Shift+F10. Breakpoint at source line: F9.
+        let detail = if self.language == SourceLanguage::C {
+            "Compile: Ctrl/Command+Enter. Continue or pause: F5. Step over: F10. Step into: F11. Step out: Shift+F11. One machine instruction: Ctrl/Command+F10 (or Alt+F10). Back one instruction: Shift+F10. Breakpoint on the cursor line: F9. Fullscreen: Ctrl+Shift+F (Control+Command+F on macOS).
+
+Machine code is grouped under the C line that produced it. The group holding the next instruction has a blue rail, and the same line is filled in the editor. Select an instruction to move the editor and memory to it.
+
+Each variable shows where it lives, such as [x29\u{2212}4] for a stack slot, x0 for a register or a global address. Select that location to outline the variable's bytes in memory.
+
+C uses a freestanding runtime: #include <vole.h> for output, printf, puts, memset, memcpy and strlen. There is no heap, input, files or floating point. -O0 keeps every variable in memory; -O1 optimizes, so some values become unavailable.
+
+Save .voleproject documents to keep the source, target, compiler settings, breakpoints and current machine state."
+        } else {
+            "Assemble: Ctrl/Command+Enter. Run or pause: F5. Step: F10. Reverse: Shift+F10. Breakpoint at source line: F9. Fullscreen: F11.
 
 Select an instruction to jump to its source and memory. Select a memory byte or register, enter a hex value, then Apply. Editing clears undo history. Arrow keys move the memory selection.
 
 VOLE uses the SimpSim extended profile. ARM and x86 currently execute the supported scalar teaching subset. Unsupported instructions stop with a fault. Simulated instructions are counted, not hardware cycles.
 
-Save .voleproject documents to preserve source, target, breakpoints, pane sizes and current machine state. Open .bin/.hex to inspect machine bytes. Export writes the assembled image.";
+Save .voleproject documents to preserve source, target, breakpoints, pane sizes and current machine state. Open .bin/.hex to inspect machine bytes. Export writes the assembled image."
+        };
         drop(window.prompt(
             PromptLevel::Info,
             "Using Vole",
@@ -971,13 +1520,15 @@ Save .voleproject documents to preserve source, target, breakpoints, pane sizes 
 impl Workbench {
     fn toolbar(&self, compact: bool, cx: &mut Context<Self>) -> Div {
         let running = self.view.state == RunState::Running;
+        let c_mode = self.language == SourceLanguage::C;
+        let building = matches!(self.view.state, RunState::Running | RunState::Assembling);
         let reverse_disabled = !self.paused()
             || self
                 .view
                 .snapshot
                 .as_ref()
                 .is_none_or(|s| s.trace.is_empty());
-        div()
+        let mut bar = div()
             .w_full()
             .min_w_0()
             .flex_none()
@@ -1000,71 +1551,159 @@ impl Workbench {
             .child(
                 Button::new("target")
                     .label(self.architecture.name())
-                    .w(px(if compact { 160. } else { 205. }))
+                    .w(px(if compact || c_mode { 160. } else { 205. }))
                     .tooltip("Choose instruction set and register width")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.architecture_menu = !this.architecture_menu;
                         cx.notify();
                     })),
             )
-            .when(!compact, |row| {
-                row.child(
-                    note(if self.architecture == Architecture::Vole {
-                        "SimpSim extended"
-                    } else {
-                        "Scalar teaching subset"
-                    })
-                    .mr(px(12.)),
+            .child(self.language_toggle(cx));
+        if c_mode {
+            let optimization = self.settings.optimization;
+            bar = bar
+                .child(
+                    Button::new("optimization")
+                        .label(optimization.flag())
+                        .tooltip(match optimization {
+                            Optimization::O0 => {
+                                "-O0: every variable lives in memory. Select to compile with -O1."
+                            }
+                            Optimization::O1 => {
+                                "-O1: optimized; some variables become unavailable. Select to compile with -O0."
+                            }
+                        })
+                        .disabled(running)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_optimization(
+                                match optimization {
+                                    Optimization::O0 => Optimization::O1,
+                                    Optimization::O1 => Optimization::O0,
+                                },
+                                cx,
+                            )
+                        })),
                 )
-            })
-            .child(
-                Button::new("assemble")
-                    .label("Assemble")
-                    .tooltip("Assemble source (Ctrl/Command+Enter)")
-                    .disabled(matches!(
-                        self.view.state,
-                        RunState::Running | RunState::Assembling
-                    ))
-                    .on_click(cx.listener(|this, _, w, cx| this.assemble(&Assemble, w, cx))),
-            )
-            .child(
-                Button::new("run")
-                    .primary()
-                    .label(if running { "Pause" } else { "Run" })
-                    .tooltip("Run / Pause (F5)")
-                    .disabled(!running && !self.can_execute())
-                    .on_click(cx.listener(|this, _, w, cx| this.run_pause(&RunPause, w, cx))),
-            )
-            .child(
-                Button::new("step")
-                    .label("Step")
-                    .tooltip("Step one instruction (F10)")
-                    .disabled(!self.can_execute())
-                    .on_click(cx.listener(|this, _, w, cx| this.step(&Step, w, cx))),
-            )
-            .child(
-                Button::new("reverse")
-                    .label(if compact { "Reverse" } else { "Reverse step" })
-                    .tooltip("Reverse step (Shift+F10)")
-                    .disabled(reverse_disabled)
-                    .on_click(cx.listener(|this, _, w, cx| this.reverse(&ReverseStep, w, cx))),
-            )
-            .child(
-                Button::new("reset")
-                    .label("Reset")
-                    .disabled(self.view.program.is_none() || running)
-                    .tooltip("Reset to assembled image (Ctrl/Command+R)")
-                    .on_click(cx.listener(|this, _, w, cx| this.reset(&Reset, w, cx))),
-            )
-            .child(div().flex_1())
-            .child(
-                Button::new("open")
-                    .ghost()
-                    .label("Open")
-                    .tooltip("Open assembly or project (Ctrl/Command+O)")
-                    .on_click(cx.listener(|this, _, w, cx| this.open(&Open, w, cx))),
-            )
-            .child(
+                .child(
+                    Button::new("assemble")
+                        .label(if self.view.state == RunState::Assembling {
+                            "Compiling"
+                        } else {
+                            "Compile"
+                        })
+                        .tooltip("Compile C source (Ctrl/Command+Enter)")
+                        .loading(self.view.state == RunState::Assembling)
+                        .disabled(building)
+                        .on_click(cx.listener(|this, _, w, cx| this.assemble(&Assemble, w, cx))),
+                )
+                .child(
+                    Button::new("run")
+                        .primary()
+                        .label(if running { "Pause" } else { "Continue" })
+                        .tooltip("Continue to the next breakpoint, or pause (F5)")
+                        .disabled(!running && !self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.run_pause(&RunPause, w, cx))),
+                )
+                .child(
+                    Button::new("step-over")
+                        .label(if compact { "Over" } else { "Step over" })
+                        .tooltip("Run to the next C line in this function (F10)")
+                        .disabled(!self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.step_over(&StepOver, w, cx))),
+                )
+                .child(
+                    Button::new("step-into")
+                        .label(if compact { "Into" } else { "Step into" })
+                        .tooltip("Run to the next C line, entering calls (F11)")
+                        .disabled(!self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.step_into(&StepInto, w, cx))),
+                )
+                .child(
+                    Button::new("step-out")
+                        .label(if compact { "Out" } else { "Step out" })
+                        .tooltip("Run until this function returns (Shift+F11)")
+                        .disabled(!self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.step_out(&StepOut, w, cx))),
+                )
+                .child(
+                    Button::new("step")
+                        .label("Instruction")
+                        .tooltip("Step one machine instruction (Ctrl/Command+F10)")
+                        .disabled(!self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.step(&Step, w, cx))),
+                )
+                .child(
+                    Button::new("reverse")
+                        .label("Back")
+                        .tooltip("Undo one machine instruction (Shift+F10)")
+                        .disabled(reverse_disabled)
+                        .on_click(
+                            cx.listener(|this, _, w, cx| this.reverse(&ReverseStep, w, cx)),
+                        ),
+                );
+        } else {
+            bar = bar
+                .when(!compact, |row| {
+                    row.child(
+                        note(if self.architecture == Architecture::Vole {
+                            "SimpSim extended"
+                        } else {
+                            "Scalar teaching subset"
+                        })
+                        .mr(px(12.)),
+                    )
+                })
+                .child(
+                    Button::new("assemble")
+                        .label("Assemble")
+                        .tooltip("Assemble source (Ctrl/Command+Enter)")
+                        .disabled(building)
+                        .on_click(cx.listener(|this, _, w, cx| this.assemble(&Assemble, w, cx))),
+                )
+                .child(
+                    Button::new("run")
+                        .primary()
+                        .label(if running { "Pause" } else { "Run" })
+                        .tooltip("Run / Pause (F5)")
+                        .disabled(!running && !self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.run_pause(&RunPause, w, cx))),
+                )
+                .child(
+                    Button::new("step")
+                        .label("Step")
+                        .tooltip("Step one instruction (F10)")
+                        .disabled(!self.can_execute())
+                        .on_click(cx.listener(|this, _, w, cx| this.step(&Step, w, cx))),
+                )
+                .child(
+                    Button::new("reverse")
+                        .label(if compact { "Reverse" } else { "Reverse step" })
+                        .tooltip("Reverse step (Shift+F10)")
+                        .disabled(reverse_disabled)
+                        .on_click(cx.listener(|this, _, w, cx| this.reverse(&ReverseStep, w, cx))),
+                );
+        }
+        bar.child(
+            Button::new("reset")
+                .label("Reset")
+                .disabled(self.view.program.is_none() || running)
+                .tooltip(if c_mode {
+                    "Restart from the compiled image (Ctrl/Command+R)"
+                } else {
+                    "Reset to assembled image (Ctrl/Command+R)"
+                })
+                .on_click(cx.listener(|this, _, w, cx| this.reset(&Reset, w, cx))),
+        )
+        .child(div().flex_1())
+        .child(
+            Button::new("open")
+                .ghost()
+                .label("Open")
+                .tooltip("Open C, assembly or project (Ctrl/Command+O)")
+                .on_click(cx.listener(|this, _, w, cx| this.open(&Open, w, cx))),
+        )
+        .when(!c_mode, |bar| {
+            bar.child(
                 Button::new("export")
                     .ghost()
                     .label("Export")
@@ -1074,16 +1713,111 @@ impl Workbench {
                         this.export_bytes(&ExportBytes, window, cx)
                     })),
             )
-            .child(
-                Button::new("save")
-                    .ghost()
-                    .label("Save")
-                    .tooltip("Save assembly or project (Ctrl/Command+S)")
-                    .on_click(cx.listener(|this, _, w, cx| this.save(&Save, w, cx))),
-            )
+        })
+        .child(
+            Button::new("save")
+                .ghost()
+                .label("Save")
+                .tooltip("Save source or project (Ctrl/Command+S)")
+                .on_click(cx.listener(|this, _, w, cx| this.save(&Save, w, cx))),
+        )
+    }
+    fn example_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        deferred(
+            anchored()
+                .anchor(Anchor::BottomRight)
+                .snap_to_window_with_margin(px(8.))
+                .child(
+                    div()
+                        .id("example-menu")
+                        .role(Role::Menu)
+                        .aria_label("C examples")
+                        .occlude()
+                        .mb(px(34.))
+                        .w(px(220.))
+                        .p(px(6.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .bg(rgb(SURFACE))
+                        .border_1()
+                        .border_color(rgb(DIVIDER))
+                        .rounded(px(6.))
+                        .children(
+                            vole_c::EXAMPLES
+                                .iter()
+                                .enumerate()
+                                .map(|(index, (name, _))| {
+                                    div()
+                                        .id(("c-example", index))
+                                        .role(Role::MenuItem)
+                                        .aria_label(format!("Load example {name}"))
+                                        .px(px(10.))
+                                        .py(px(5.))
+                                        .rounded(px(4.))
+                                        .font_family(MONO)
+                                        .text_size(px(13.))
+                                        .text_color(rgb(if index == self.example_index {
+                                            READ
+                                        } else {
+                                            INK
+                                        }))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(rgb(0x2b3b51)))
+                                        .child(*name)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.choose_example(index, window, cx)
+                                        }))
+                                }),
+                        )
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.example_menu = false;
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+    /// Two-segment Assembly / C switch. C is unavailable for the VOLE machine.
+    fn language_toggle(&self, cx: &mut Context<Self>) -> Div {
+        let vole = self.architecture == Architecture::Vole;
+        let running = self.view.state == RunState::Running;
+        let segment = |language: SourceLanguage, label: &'static str| {
+            let selected = self.language == language;
+            Button::new((ElementId::from("language"), label))
+                .ghost()
+                .small()
+                .label(label)
+                .min_w(px(if language == SourceLanguage::C {
+                    34.
+                } else {
+                    76.
+                }))
+                .when(selected, |b| b.bg(rgb(SURFACE)).text_color(rgb(INK)))
+                .when(!selected, |b| b.text_color(rgb(MUTED)))
+                .tooltip(match language {
+                    SourceLanguage::C if vole => "C targets ARM32, ARM64, x86 and x64",
+                    SourceLanguage::C => "Write C and debug it line by line",
+                    SourceLanguage::Assembly => "Write assembly for the selected target",
+                })
+                .disabled(running || !selected && language == SourceLanguage::C && vole)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.choose_language(language, window, cx)
+                }))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(rgb(DIVIDER))
+            .child(segment(SourceLanguage::Assembly, "Assembly"))
+            .child(segment(SourceLanguage::C, "C"))
     }
 
     fn source_panel(&self, cx: &mut Context<Self>) -> Div {
+        let c_mode = self.language == SourceLanguage::C;
         let byte_count = self
             .view
             .program
@@ -1096,19 +1830,55 @@ impl Workbench {
                     .sum::<usize>()
             })
             .unwrap_or(0);
-        let stale = self.view.state == RunState::Editing;
+        let stale = self.view.state == RunState::Editing
+            || self.view.state != RunState::Assembling && !self.image_matches();
         let name = self
             .file_path
             .as_ref()
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| format!("Untitled.{}", self.architecture.id()));
+            .unwrap_or_else(|| self.untitled_name());
+        let footer = if self.view.state == RunState::Assembling {
+            if c_mode {
+                "Compiling with Clang".to_string()
+            } else {
+                "Assembling".to_string()
+            }
+        } else if stale && c_mode {
+            let errors = self
+                .view
+                .diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .count();
+            if errors > 0 {
+                format!(
+                    "{errors} error{} to fix before running",
+                    if errors == 1 { "" } else { "s" }
+                )
+            } else {
+                "Source changed. Compile to run.".into()
+            }
+        } else if stale {
+            "Source changed. Assemble to run.".into()
+        } else if c_mode {
+            format!(
+                "{byte_count} code bytes compiled with {}",
+                self.settings.optimization.flag()
+            )
+        } else {
+            format!("{byte_count} code bytes assembled")
+        };
         pane()
-            .child(heading("Assembly", name))
+            .child(heading(if c_mode { "C source" } else { "Assembly" }, name))
             .child(
                 div().min_h_0().flex_1().overflow_hidden().child(
                     Editor::new(&self.editor)
-                        .aria_label("Assembly source editor")
+                        .aria_label(if c_mode {
+                            "C source editor"
+                        } else {
+                            "Assembly source editor"
+                        })
                         .bordered(false)
                         .readonly(self.view.state == RunState::Running)
                         .p(px(12.))
@@ -1126,56 +1896,39 @@ impl Workbench {
                     .gap(px(8.))
                     .px(px(20.))
                     .py(px(8.))
-                    .child(note(if stale {
-                        "Source changed. Assemble to run.".into()
-                    } else {
-                        format!("{byte_count} code bytes assembled")
-                    }))
+                    .child(note(footer))
                     .child(
-                        Button::new("example")
-                            .ghost()
-                            .small()
-                            .label("Load example")
-                            .disabled(self.view.state == RunState::Running)
-                            .on_click(
-                                cx.listener(|this, _, w, cx| {
-                                    this.load_example(&LoadExample, w, cx)
-                                }),
-                            ),
+                        div()
+                            .relative()
+                            .child(
+                                Button::new("example")
+                                    .ghost()
+                                    .small()
+                                    .label(if c_mode { "Examples" } else { "Load example" })
+                                    .disabled(self.view.state == RunState::Running)
+                                    .on_click(cx.listener(move |this, _, w, cx| {
+                                        if c_mode {
+                                            this.example_menu = !this.example_menu;
+                                            cx.notify();
+                                        } else {
+                                            this.load_example(&LoadExample, w, cx)
+                                        }
+                                    })),
+                            )
+                            .when(c_mode && self.example_menu, |anchor| {
+                                anchor.child(self.example_menu(cx))
+                            }),
                     ),
             )
             .when(!self.view.diagnostics.is_empty(), |panel| {
-                panel.child(
-                    div()
-                        .id("diagnostics")
-                        .max_h(px(110.))
-                        .overflow_y_scroll()
-                        .px(px(20.))
-                        .pb(px(12.))
-                        .children(self.view.diagnostics.iter().enumerate().map(|(index, d)| {
-                            let line = d.line;
-                            div()
-                                .id(("diagnostic", index))
-                                .text_size(px(12.))
-                                .text_color(rgb(ERROR))
-                                .py(px(4.))
-                                .cursor_pointer()
-                                .child(format!("Line {}: {}", d.line, d.message))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.editor.update(cx, |state, cx| {
-                                        state.set_cursor_position(
-                                            Position::new(line.saturating_sub(1) as u32, 0),
-                                            window,
-                                            cx,
-                                        )
-                                    });
-                                }))
-                        })),
-                )
+                panel.child(self.diagnostics_list(cx))
             })
     }
 
     fn instructions_panel(&self, cx: &mut Context<Self>) -> Div {
+        if self.language == SourceLanguage::C {
+            return self.machine_code_panel(cx);
+        }
         let count = self.view.disassembly.len();
         pane()
             .child(heading(
@@ -1325,7 +2078,12 @@ impl Workbench {
             )
     }
     fn decode_strip(&self) -> Div {
-        let Some(instruction) = self.view.current_instruction.as_ref() else {
+        let Some(instruction) = self
+            .view
+            .current_instruction
+            .as_ref()
+            .filter(|_| self.image_matches())
+        else {
             return div()
                 .border_t_1()
                 .border_color(rgb(DIVIDER))
@@ -1333,7 +2091,11 @@ impl Workbench {
                 .child(note(if self.view.state == RunState::Halted {
                     "Machine halted. Reset or reverse step to continue."
                 } else {
-                    "Decoded instruction appears after assembly."
+                    if self.language == SourceLanguage::C {
+                        "The next instruction is decoded here after compiling."
+                    } else {
+                        "Decoded instruction appears after assembly."
+                    }
                 }));
         };
         let mut strip = div()
@@ -1510,18 +2272,39 @@ impl Workbench {
 
     fn registers_panel(&self, cx: &mut Context<Self>) -> Div {
         let Some(snapshot) = self.view.snapshot.as_ref() else {
-            return pane().child(heading("Registers", "")).child(
-                div()
-                    .p(px(20.))
-                    .child(note("Assemble a program to inspect the machine.")),
-            );
+            return pane()
+                .child(heading("Registers", ""))
+                .child(
+                    div()
+                        .p(px(20.))
+                        .child(note(if self.language == SourceLanguage::C {
+                            "Compile a program to inspect the machine."
+                        } else {
+                            "Assemble a program to inspect the machine."
+                        })),
+                );
         };
         let current = self.view.current_instruction.as_ref();
         let last = snapshot.trace.last();
-        let columns = if self.architecture == Architecture::Vole {
+        let c_mode = self.language == SourceLanguage::C;
+        // Two 64-bit columns need about 370px; narrower inspectors and compact
+        // tabs keep one column instead of clipping values.
+        let inspector_width = self
+            .split_main
+            .read(cx)
+            .sizes()
+            .get(1)
+            .map_or(380., |w| f32::from(*w));
+        let wide_enough = self.architecture.bits() < 64 || inspector_width >= 370.;
+        let columns = if self.architecture == Architecture::Vole || c_mode && wide_enough {
             2
         } else {
             1
+        };
+        let register_text = if c_mode && self.architecture.bits() == 64 {
+            12.
+        } else {
+            13.
         };
         let mut registers = snapshot.registers.iter().collect::<Vec<_>>();
         if matches!(self.architecture, Architecture::Arm32 | Architecture::Arm64) {
@@ -1553,11 +2336,12 @@ impl Workbench {
         let chunks = registers.len().div_ceil(columns);
         let mut rows = Vec::new();
         for index in 0..chunks {
-            let mut row = div()
-                .flex()
-                .items_center()
-                .gap(px(12.))
-                .h(px(29. * self.zoom));
+            let mut row =
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .h(px(if c_mode { 25. } else { 29. } * self.zoom));
             for column in 0..columns {
                 if let Some(register) = registers.get(index + column * chunks) {
                     let name = register.name.clone();
@@ -1600,7 +2384,7 @@ impl Workbench {
                                 WORKSPACE
                             }))
                             .font_family(MONO)
-                            .text_size(px(13. * self.zoom))
+                            .text_size(px(register_text * self.zoom))
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(SURFACE)))
                             .child(div().text_color(rgb(MUTED)).child(name.clone()))
@@ -1616,6 +2400,9 @@ impl Workbench {
                                 cx.notify();
                             })),
                     );
+                } else {
+                    // Keep the last row's lone register in its own column.
+                    row = row.child(div().flex_1());
                 }
             }
             rows.push(row);
@@ -1688,7 +2475,9 @@ impl Workbench {
                             }),
                         ))
                     })
-                    .child(note("Select a register to inspect or edit it.")),
+                    .when(!c_mode, |panel| {
+                        panel.child(note("Select a register to inspect or edit it."))
+                    }),
             )
     }
     fn explanation_panel(&self) -> Div {
@@ -2066,7 +2855,8 @@ impl Workbench {
                         && byte_address < m.address.saturating_add(m.length as u64)
                 })
             });
-            let selected = self.selected == byte_address;
+            let selected = byte_address >= self.selected
+                && byte_address < self.selected.saturating_add(self.selection_len.max(1));
             line = line.child(
                 div()
                     .id(("byte", byte_address))
@@ -2202,6 +2992,7 @@ impl Workbench {
                                         4 => 8,
                                         _ => 1,
                                     };
+                                    this.selection_len = this.edit_width as u64;
                                     this.set_edit_value(w, cx);
                                     cx.notify();
                                 })),
@@ -2322,10 +3113,74 @@ impl Workbench {
         }
         panel
     }
+    fn c_status(&self) -> String {
+        let pc = self.view.snapshot.as_ref().map(|s| s.pc);
+        match self.view.state {
+            _ if self.view.state != RunState::Assembling && !self.image_matches() => {
+                "Compile the C source to run it.".into()
+            }
+            RunState::Editing => self
+                .view
+                .diagnostics
+                .iter()
+                .find(|d| d.is_error())
+                .map(|d| format!("Line {}: {}", d.line, d.message))
+                .unwrap_or_else(|| "Source changed. Compile before running.".into()),
+            RunState::Assembling => format!(
+                "Compiling with Clang {}.",
+                self.settings.optimization.flag()
+            ),
+            RunState::Running => match self.view.stepping {
+                Some(SourceStep::Over) => "Stepping over the current line.".into(),
+                Some(SourceStep::Into) => "Stepping to the next line.".into(),
+                Some(SourceStep::Out) => "Running until this function returns.".into(),
+                None => "Running. Press F5 to pause.".into(),
+            },
+            _ if self.breakpoint_note.is_some() => self.breakpoint_note.clone().unwrap_or_default(),
+            RunState::Halted => match self.view.debug.as_ref().and_then(|d| d.exit_status) {
+                Some(status) => format!("Program exited with status {status}."),
+                None => self.view.message.clone(),
+            },
+            RunState::Faulted => self.view.message.clone(),
+            RunState::Paused | RunState::Ready => {
+                let debug = self.view.debug.as_ref();
+                let place = debug.and_then(|d| d.location.as_ref()).filter(|l| l.user);
+                let function = debug
+                    .and_then(|d| d.frames.first())
+                    .map(|f| f.function.clone());
+                match (place, pc) {
+                    (Some(location), Some(pc)) => format!(
+                        "{} at line {}{}, before {}.",
+                        if self.view.state == RunState::Ready {
+                            "Ready"
+                        } else {
+                            "Paused"
+                        },
+                        location.line,
+                        function.map(|f| format!(" in {f}")).unwrap_or_default(),
+                        cmodel::hex_address(pc)
+                    ),
+                    (None, Some(pc)) => match debug.and_then(|d| d.note.clone()) {
+                        Some(note) => format!("{note} Next instruction {}.", cmodel::hex_address(pc)),
+                        None if self.view.state == RunState::Ready => {
+                            "Ready. Step into to stop at the first line of main, or continue to a breakpoint.".into()
+                        }
+                        None => format!(
+                            "Paused in code without C source, before {}.",
+                            cmodel::hex_address(pc)
+                        ),
+                    },
+                    _ => self.view.message.clone(),
+                }
+            }
+        }
+    }
     fn status_bar(&self, cx: &mut Context<Self>) -> Div {
         let steps = self.view.snapshot.as_ref().map(|s| s.steps).unwrap_or(0);
         let status = if let Some(error) = &self.edit_error {
             error.clone()
+        } else if self.language == SourceLanguage::C {
+            self.c_status()
         } else if self.view.state == RunState::Editing {
             "Source changed. Assemble before running.".into()
         } else if matches!(self.view.state, RunState::Paused | RunState::Ready) {
@@ -2403,6 +3258,7 @@ impl Focusable for Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = f32::from(window.viewport_size().width);
+        let height = f32::from(window.viewport_size().height);
         let compact = width < 1150.;
         if !compact && let Some(layout) = self.pending_layout.take() {
             // Wait until the groups have measured their current viewport before applying ratios.
@@ -2428,21 +3284,35 @@ impl Render for Workbench {
                 });
             });
         }
+        let c_mode = self.language == SourceLanguage::C;
         let content = if compact {
             let mut tabs = div()
                 .flex()
+                .flex_wrap()
                 .gap(px(4.))
                 .px(px(12.))
                 .py(px(8.))
                 .border_b_1()
                 .border_color(rgb(DIVIDER));
-            for (tab, label) in [
-                (CompactTab::Assembly, "Assembly"),
-                (CompactTab::Instructions, "Instructions"),
-                (CompactTab::Memory, "Memory"),
-                (CompactTab::Registers, "Registers"),
-                (CompactTab::Trace, "Trace"),
-            ] {
+            let entries: &[(CompactTab, &str)] = if c_mode {
+                &[
+                    (CompactTab::Source, "C source"),
+                    (CompactTab::Instructions, "Machine code"),
+                    (CompactTab::Variables, "Variables"),
+                    (CompactTab::Memory, "Memory"),
+                    (CompactTab::Registers, "Registers"),
+                    (CompactTab::Trace, "Output"),
+                ]
+            } else {
+                &[
+                    (CompactTab::Source, "Assembly"),
+                    (CompactTab::Instructions, "Instructions"),
+                    (CompactTab::Memory, "Memory"),
+                    (CompactTab::Registers, "Registers"),
+                    (CompactTab::Trace, "Trace"),
+                ]
+            };
+            for &(tab, label) in entries {
                 tabs = tabs.child(
                     Button::new((ElementId::from("compact-tab"), label))
                         .ghost()
@@ -2455,9 +3325,23 @@ impl Render for Workbench {
                         })),
                 );
             }
-            let panel = match self.compact_tab {
-                CompactTab::Assembly => self.source_panel(cx),
+            let tab = if !c_mode && self.compact_tab == CompactTab::Variables {
+                CompactTab::Source
+            } else {
+                self.compact_tab
+            };
+            let panel = match tab {
+                CompactTab::Source => self.source_panel(cx),
                 CompactTab::Instructions => self.instructions_panel(cx),
+                CompactTab::Variables => pane()
+                    .child(self.call_stack_panel(cx).h_auto().flex_none())
+                    .child(
+                        self.variables_panel(cx)
+                            .flex_1()
+                            .min_h_0()
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER)),
+                    ),
                 CompactTab::Memory => self.memory_panel(true, cx),
                 CompactTab::Registers => {
                     let panel = pane().child(self.registers_panel(cx).flex_1().min_h_0());
@@ -2467,6 +3351,7 @@ impl Render for Workbench {
                         panel
                     }
                 }
+                CompactTab::Trace if c_mode => self.output_panel(),
                 CompactTab::Trace => self.trace_panel(),
             };
             pane().child(tabs).child(panel).into_any_element()
@@ -2475,14 +3360,14 @@ impl Render for Workbench {
                 .with_state(&self.split_vertical)
                 .child(
                     resizable_panel()
-                        .size(px(390.))
+                        .size(px(if c_mode { 470. } else { 390. }))
                         .size_range(px(220.)..px(1200.))
                         .child(
                             h_resizable("source-instructions")
                                 .with_state(&self.split_source)
                                 .child(
                                     resizable_panel()
-                                        .size(px(460.))
+                                        .size(px(if c_mode { 500. } else { 460. }))
                                         .size_range(px(260.)..px(1200.))
                                         .child(self.source_panel(cx)),
                                 )
@@ -2498,18 +3383,44 @@ impl Render for Workbench {
                         .size_range(px(220.)..px(1200.))
                         .child(self.memory_panel(false, cx)),
                 );
-            let right = pane()
-                .child(
-                    self.registers_panel(cx)
-                        .h(px(if self.architecture == Architecture::Vole {
-                            330.
-                        } else {
-                            350.
-                        }))
-                        .flex_none(),
-                )
-                .child(self.explanation_panel())
-                .child(self.trace_panel());
+            let right = if c_mode {
+                pane()
+                    .child(self.call_stack_panel(cx).h_auto().flex_none())
+                    .child(
+                        self.variables_panel(cx)
+                            .flex_1()
+                            .min_h(px(140.))
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER)),
+                    )
+                    .child(
+                        self.registers_panel(cx)
+                            .h(px(((height - 260.) * 0.36).clamp(170., 300.)))
+                            .flex_none()
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER)),
+                    )
+                    .child(
+                        self.output_panel()
+                            .h(px(if height < 860. { 112. } else { 132. }))
+                            .flex_none()
+                            .border_t_1()
+                            .border_color(rgb(DIVIDER)),
+                    )
+            } else {
+                pane()
+                    .child(
+                        self.registers_panel(cx)
+                            .h(px(if self.architecture == Architecture::Vole {
+                                330.
+                            } else {
+                                350.
+                            }))
+                            .flex_none(),
+                    )
+                    .child(self.explanation_panel())
+                    .child(self.trace_panel())
+            };
             h_resizable("main-inspector")
                 .with_state(&self.split_main)
                 .child(
@@ -2519,7 +3430,9 @@ impl Render for Workbench {
                 )
                 .child(
                     resizable_panel()
-                        .size(px(if self.architecture.bits() == 64 {
+                        .size(px(if c_mode {
+                            380.
+                        } else if self.architecture.bits() == 64 {
                             360.
                         } else {
                             320.
@@ -2535,12 +3448,19 @@ impl Render for Workbench {
             .aria_label("Vole instruction simulation workbench")
             .relative()
             .track_focus(&self.focus)
-            .key_context("Workbench")
+            .key_context(if c_mode {
+                "Workbench CMode"
+            } else {
+                "Workbench"
+            })
             .font_family(SANS)
             .text_size(px(14.))
             .on_action(cx.listener(Self::assemble))
             .on_action(cx.listener(Self::run_pause))
             .on_action(cx.listener(Self::step))
+            .on_action(cx.listener(Self::step_over))
+            .on_action(cx.listener(Self::step_into))
+            .on_action(cx.listener(Self::step_out))
             .on_action(cx.listener(Self::reverse))
             .on_action(cx.listener(Self::reset))
             .on_action(cx.listener(Self::open))
@@ -2581,9 +3501,16 @@ impl Render for Workbench {
                 .border_color(rgb(DIVIDER))
                 .rounded(px(6.))
                 .children(Architecture::ALL.into_iter().map(|architecture| {
+                    let unavailable = c_mode && architecture == Architecture::Vole;
                     Button::new((ElementId::from("architecture"), architecture.id()))
                         .ghost()
                         .label(architecture.name())
+                        .disabled(unavailable)
+                        .when(unavailable, |button| {
+                            button.tooltip(
+                                "VOLE runs assembly only. C targets ARM32, ARM64, x86 and x64.",
+                            )
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.choose_architecture(architecture, window, cx)
                         }))
@@ -2592,6 +3519,124 @@ impl Render for Workbench {
         }
         shell
     }
+}
+
+/// A document read off the UI thread, ready to replace the current session.
+struct LoadedDocument {
+    path: Option<PathBuf>,
+    architecture: Architecture,
+    language: SourceLanguage,
+    settings: CompilerSettings,
+    source: String,
+    breakpoints: BTreeSet<u64>,
+    source_breakpoints: BTreeSet<usize>,
+    layout: Option<vole_project::Layout>,
+    program: Option<vole_core::Program>,
+    snapshot: Option<vole_core::Snapshot>,
+}
+
+fn load_document(
+    path: PathBuf,
+    architecture: Architecture,
+    language: SourceLanguage,
+) -> Result<LoadedDocument, vole_core::SimError> {
+    let error = |e: std::io::Error| vole_core::SimError(e.to_string());
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if extension == "voleproject" || extension == "json" {
+        let p = Project::open(&path)?;
+        if let Some(image) = p.image.as_ref() {
+            let mut validation = vole_runtime::Session::new(p.architecture, p.source.clone());
+            validation.apply(Command::Restore {
+                program: image.clone(),
+                snapshot: p.snapshot.clone(),
+            })?;
+        }
+        return Ok(LoadedDocument {
+            path: Some(path),
+            architecture: p.architecture,
+            language: p.language,
+            settings: p.compiler,
+            source: p.source,
+            breakpoints: p.breakpoints,
+            source_breakpoints: p.source_breakpoints,
+            layout: Some(p.layout),
+            program: p.image,
+            snapshot: p.snapshot,
+        });
+    }
+    let file = std::fs::File::open(&path).map_err(error)?;
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(error)?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(vole_core::SimError("File exceeds the 1 MiB limit.".into()));
+    }
+    let mut document = LoadedDocument {
+        path: None,
+        architecture,
+        language: SourceLanguage::Assembly,
+        settings: CompilerSettings::default(),
+        source: String::new(),
+        breakpoints: BTreeSet::new(),
+        source_breakpoints: BTreeSet::new(),
+        layout: None,
+        program: None,
+        snapshot: None,
+    };
+    if extension == "bin" || extension == "prg" || extension == "hex" {
+        let image = if extension == "hex" {
+            let text = String::from_utf8(bytes).map_err(|_| {
+                vole_core::SimError(
+                    "Hex file must be UTF-8 text with pairs of hexadecimal digits.".into(),
+                )
+            })?;
+            let compact = text.split_whitespace().collect::<String>();
+            if compact.len() % 2 != 0 || !compact.is_ascii() {
+                return Err(vole_core::SimError(
+                    "Hex file must contain complete byte pairs.".into(),
+                ));
+            }
+            (0..compact.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&compact[i..i + 2], 16)
+                        .map_err(|_| vole_core::SimError("Invalid hexadecimal byte.".into()))
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            bytes
+        };
+        let program = vole_runtime::import_bytes(architecture, &image)?;
+        document.source = program.source.clone();
+        document.program = Some(program);
+        return Ok(document);
+    }
+    let is_c = extension == "c" || extension == "h";
+    document.source = String::from_utf8(bytes).map_err(|_| {
+        vole_core::SimError(format!(
+            "{} files must contain UTF-8 text. Open binary images with a .bin extension.",
+            if is_c { "C" } else { "Assembly" }
+        ))
+    })?;
+    document.path = Some(path);
+    if is_c {
+        document.language = SourceLanguage::C;
+        if architecture == Architecture::Vole {
+            // C targets the real ISAs; ARM64 is the default teaching target.
+            document.architecture = Architecture::Arm64;
+        }
+    } else if !matches!(extension.as_str(), "s" | "asm") {
+        document.language = language;
+        if language == SourceLanguage::C && architecture == Architecture::Vole {
+            document.language = SourceLanguage::Assembly;
+        }
+    }
+    Ok(document)
 }
 
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), vole_core::SimError> {
@@ -2667,11 +3712,48 @@ fn main() {
         .find(|a| a[0] == "--arch")
         .and_then(|a| Architecture::parse(&a[1]))
         .unwrap_or_default();
-    let demo_steps = if arguments.iter().any(|arg| arg == "--visual-demo") {
-        2
-    } else {
-        0
+    let value = |flag: &str| {
+        arguments
+            .windows(2)
+            .find(|a| a[0] == flag)
+            .map(|a| a[1].to_ascii_lowercase())
     };
+    let demo = if arguments.iter().any(|arg| arg == "--visual-demo-c") {
+        Demo::C
+    } else if arguments.iter().any(|arg| arg == "--visual-demo") {
+        Demo::Assembly
+    } else {
+        Demo::None
+    };
+    let initial_language = if demo == Demo::C || value("--language").as_deref() == Some("c") {
+        SourceLanguage::C
+    } else {
+        SourceLanguage::Assembly
+    };
+    let initial_architecture =
+        if initial_language == SourceLanguage::C && initial_architecture == Architecture::Vole {
+            Architecture::Arm64
+        } else {
+            initial_architecture
+        };
+    let initial_optimization = if value("--opt").as_deref() == Some("o1") {
+        Optimization::O1
+    } else {
+        Optimization::O0
+    };
+    let initial_document = arguments
+        .windows(2)
+        .find(|a| a[0] == "--open")
+        .map(|a| PathBuf::from(&a[1]));
+    let initial_tab = value("--tab").and_then(|tab| match tab.as_str() {
+        "source" => Some(CompactTab::Source),
+        "machine" | "instructions" => Some(CompactTab::Instructions),
+        "variables" => Some(CompactTab::Variables),
+        "memory" => Some(CompactTab::Memory),
+        "registers" => Some(CompactTab::Registers),
+        "output" | "trace" => Some(CompactTab::Trace),
+        _ => None,
+    });
     let application = gpui_platform::application().with_assets(gpui_kit::assets::Assets);
     application.on_reopen(open_main_window);
     application.run(move |cx| {
@@ -2689,7 +3771,11 @@ fn main() {
         cx.set_global(DesktopSession {
             workbench: None,
             initial_architecture,
-            demo_steps,
+            initial_language,
+            initial_tab,
+            initial_document,
+            initial_optimization,
+            demo,
         });
         cx.on_action(|_: &Quit, cx: &mut App| {
             open_main_window(cx);
@@ -2722,7 +3808,14 @@ fn main() {
             // Input's secondary Enter binding otherwise consumes the workbench shortcut.
             KeyBinding::new(&format!("{primary}-enter"), Assemble, Some("Input")),
             KeyBinding::new("f5", RunPause, Some("Workbench")),
-            KeyBinding::new("f10", Step, Some("Workbench")),
+            // Assembly mode keeps F10 for one instruction and F11 for fullscreen.
+            // C mode uses the common source-debugger keys and moves fullscreen.
+            KeyBinding::new("f10", Step, Some("Workbench && !CMode")),
+            KeyBinding::new("f10", StepOver, Some("Workbench && CMode")),
+            KeyBinding::new("f11", StepInto, Some("Workbench && CMode")),
+            KeyBinding::new("shift-f11", StepOut, Some("Workbench && CMode")),
+            KeyBinding::new(&format!("{primary}-f10"), Step, Some("Workbench && CMode")),
+            KeyBinding::new("alt-f10", Step, Some("Workbench && CMode")),
             KeyBinding::new("shift-f10", ReverseStep, Some("Workbench")),
             KeyBinding::new(&format!("{primary}-r"), Reset, Some("Workbench")),
             KeyBinding::new(&format!("{primary}-o"), Open, Some("Workbench")),
@@ -2731,7 +3824,16 @@ fn main() {
             KeyBinding::new("f9", ToggleBreakpoint, Some("Workbench")),
             KeyBinding::new(&format!("{primary}-="), ZoomIn, Some("Workbench")),
             KeyBinding::new(&format!("{primary}--"), ZoomOut, Some("Workbench")),
-            KeyBinding::new("f11", Fullscreen, Some("Workbench")),
+            KeyBinding::new("f11", Fullscreen, Some("Workbench && !CMode")),
+            KeyBinding::new(
+                if cfg!(target_os = "macos") {
+                    "ctrl-cmd-f"
+                } else {
+                    "ctrl-shift-f"
+                },
+                Fullscreen,
+                Some("Workbench"),
+            ),
             KeyBinding::new("f1", ShowHelp, Some("Workbench")),
             KeyBinding::new(
                 &format!("{primary}-shift-e"),
@@ -2757,7 +3859,7 @@ fn main() {
                 MenuItem::action("Save as…", SaveAs),
                 MenuItem::action("Export machine bytes…", ExportBytes),
                 MenuItem::separator(),
-                MenuItem::action("Load architecture example", LoadExample),
+                MenuItem::action("Load example", LoadExample),
             ]),
             Menu::new("Edit").items([
                 MenuItem::action("Undo", gpui_kit::component::input::Undo),
@@ -2769,9 +3871,12 @@ fn main() {
                 MenuItem::action("Select all", gpui_kit::component::input::SelectAll),
             ]),
             Menu::new("Run").items([
-                MenuItem::action("Assemble", Assemble),
+                MenuItem::action("Assemble or compile", Assemble),
                 MenuItem::action("Run / Pause", RunPause),
                 MenuItem::action("Step", Step),
+                MenuItem::action("Step over C line", StepOver),
+                MenuItem::action("Step into C line", StepInto),
+                MenuItem::action("Step out of C function", StepOut),
                 MenuItem::action("Reverse step", ReverseStep),
                 MenuItem::action("Reset", Reset),
                 MenuItem::separator(),
@@ -2786,88 +3891,4 @@ fn main() {
         ]);
         open_main_window(cx);
     });
-}
-
-fn syntax_tokens(source: &str) -> Vec<TextDecoration> {
-    let mut tokens = Vec::new();
-    let mut base = 0;
-    for line in source.split_inclusive('\n') {
-        let comment = line
-            .char_indices()
-            .find(|(_, c)| *c == ';' || *c == '@')
-            .map(|(i, _)| i)
-            .or_else(|| line.find("//"));
-        let code = &line[..comment.unwrap_or(line.len())];
-        let bytes = code.as_bytes();
-        let mut index = 0;
-        let mut first = true;
-        while index < bytes.len() {
-            if !(bytes[index].is_ascii_alphanumeric()
-                || bytes[index] == b'_'
-                || bytes[index] == b'.')
-            {
-                index += 1;
-                continue;
-            }
-            let start = index;
-            while index < bytes.len()
-                && (bytes[index].is_ascii_alphanumeric() || matches!(bytes[index], b'_' | b'.'))
-            {
-                index += 1;
-            }
-            let token = &code[start..index];
-            let lower = token.to_ascii_lowercase();
-            let color = if lower.starts_with('r')
-                && lower[1..].chars().all(|c| c.is_ascii_hexdigit())
-                || lower.starts_with('x') && lower[1..].chars().all(|c| c.is_ascii_digit())
-                || lower.starts_with('w') && lower[1..].chars().all(|c| c.is_ascii_digit())
-                || matches!(
-                    lower.as_str(),
-                    "rax"
-                        | "rbx"
-                        | "rcx"
-                        | "rdx"
-                        | "eax"
-                        | "ebx"
-                        | "ecx"
-                        | "edx"
-                        | "rsp"
-                        | "rbp"
-                        | "esp"
-                        | "ebp"
-                        | "sp"
-                        | "lr"
-                        | "pc"
-                ) {
-                Some(INK)
-            } else if token.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                Some(WRITE)
-            } else if first && bytes.get(index) != Some(&b':') {
-                Some(READ)
-            } else {
-                None
-            };
-            if let Some(color) = color {
-                tokens.push(TextDecoration::new(
-                    base + start..base + index,
-                    HighlightStyle {
-                        color: Some(rgb(color).into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-            first = false;
-        }
-        if let Some(comment) = comment {
-            tokens.push(TextDecoration::new(
-                base + comment..base + line.trim_end_matches('\n').len(),
-                HighlightStyle {
-                    color: Some(rgb(MUTED).into()),
-                    ..Default::default()
-                },
-            ));
-        }
-        base += line.len();
-    }
-    tokens
 }

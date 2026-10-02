@@ -339,4 +339,151 @@ mod tests {
         assert_eq!(restored.source, "load R1, 2\nhalt");
         assert!(restored.image.is_none());
     }
+
+    fn c_image(source: &str) -> Program {
+        use vole_core::debug::{DebugInfo, LineRow, SourceFile};
+        Program {
+            architecture: Architecture::Arm64,
+            source: source.into(),
+            entry: 0x1000,
+            regions: vec![vole_core::MemoryRegion {
+                base: 0x1000,
+                bytes: vec![0x00, 0x00, 0x20, 0xd4],
+                writable: false,
+                executable: true,
+                label: "Code".into(),
+            }],
+            instructions: vec![],
+            symbols: [("main".to_string(), 0x1000)].into(),
+            initial_registers: [("sp".to_string(), 0x20000)].into(),
+            language: SourceLanguage::C,
+            debug: Some(DebugInfo {
+                producer: "clang".into(),
+                triple: "aarch64-none-elf".into(),
+                settings: CompilerSettings {
+                    optimization: vole_core::Optimization::O1,
+                    warnings: false,
+                },
+                files: vec![SourceFile {
+                    name: "main.c".into(),
+                    user: true,
+                }],
+                lines: vec![LineRow {
+                    address: 0x1000,
+                    file: 0,
+                    line: 1,
+                    column: 1,
+                    is_stmt: true,
+                    prologue_end: true,
+                    end_sequence: false,
+                }],
+                return_address_register: "x30".into(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn c_projects_round_trip_language_settings_breakpoints_image_and_state() {
+        let source = "int main(void) { return 0; }\n";
+        let settings = CompilerSettings {
+            optimization: vole_core::Optimization::O1,
+            warnings: false,
+        };
+        let mut project = Project::new_c(Architecture::Arm64, source, settings.clone());
+        project.source_breakpoints = [1, 4].into();
+        project.breakpoints.insert(0x1000);
+        project.image = Some(c_image(source));
+        project.snapshot = Some(Snapshot {
+            architecture: Architecture::Arm64,
+            pc: 0x1000,
+            registers: vec![],
+            flags: Default::default(),
+            memory: vec![],
+            output: b"hi".to_vec(),
+            halted: false,
+            steps: 3,
+            trace: vec![],
+        });
+        let json = project.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["language"], "c");
+        assert_eq!(value["compiler"]["optimization"], "O1");
+        let restored = Project::from_json(&json).unwrap();
+        assert_eq!(restored, project);
+        assert_eq!(restored.compiler, settings);
+        assert_eq!(restored.image.unwrap().debug.unwrap().lines.len(), 1);
+    }
+
+    #[test]
+    fn version_one_assembly_documents_from_earlier_releases_still_open() {
+        let json = r#"{
+            "version": 1,
+            "architecture": "arm64",
+            "source": ".text\n.global _start\n_start:\n    brk #0\n",
+            "breakpoints": [4096],
+            "profile": "scalar-v1",
+            "layout": {"source_fraction": 0.5, "top_fraction": 0.5, "inspector_width": 320.0, "memory_rows": 16},
+            "image": null,
+            "snapshot": null
+        }"#;
+        let project = Project::from_json(json).unwrap();
+        assert_eq!(project.language, SourceLanguage::Assembly);
+        assert_eq!(project.compiler, CompilerSettings::default());
+        assert!(project.source_breakpoints.is_empty());
+        assert!(project.breakpoints.contains(&0x1000));
+    }
+
+    #[test]
+    fn version_one_documents_cannot_contain_c() {
+        let mut project = Project::new_c(
+            Architecture::Arm64,
+            "int main(void) { return 0; }",
+            CompilerSettings::default(),
+        );
+        project.version = PROJECT_VERSION;
+        assert!(project.to_json().unwrap_err().0.contains("version 2"));
+        let mut value: serde_json::Value = serde_json::from_str(
+            &Project::new_c(
+                Architecture::X64,
+                "int main(void){return 0;}",
+                Default::default(),
+            )
+            .to_json()
+            .unwrap(),
+        )
+        .unwrap();
+        value["version"] = 1.into();
+        assert!(Project::from_json(&value.to_string()).is_err());
+        let mut breakpoints_only = Project::new(Architecture::Arm64, "brk #0");
+        breakpoints_only.source_breakpoints.insert(3);
+        assert!(breakpoints_only.validate().is_err());
+    }
+
+    #[test]
+    fn c_projects_reject_vole_targets_and_mismatched_images() {
+        let mut project =
+            Project::new_c(Architecture::Vole, "int main(void){}", Default::default());
+        project.profile = default_profile();
+        assert!(project.validate().unwrap_err().0.contains("C projects"));
+        let mut project = Project::new_c(Architecture::Arm64, "int x;", Default::default());
+        let mut image = c_image("int x;");
+        image.language = SourceLanguage::Assembly;
+        project.image = Some(image);
+        assert!(project.validate().unwrap_err().0.contains("language"));
+    }
+
+    #[test]
+    fn assembly_saves_stay_version_one_without_c_fields() {
+        let mut project = Project::new(Architecture::Arm64, Architecture::Arm64.example_source());
+        project.breakpoints.insert(0x1004);
+        let json = project.to_json().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["version"], 1);
+        let object = value.as_object().unwrap();
+        for field in ["language", "compiler", "source_breakpoints"] {
+            assert!(!object.contains_key(field), "{field} leaked into {json}");
+        }
+    }
 }

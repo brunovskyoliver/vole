@@ -8,7 +8,7 @@ use std::{
 };
 use vole_core::{
     Architecture, CompilerSettings, Diagnostic, Instruction, Machine, Program, SimError, Snapshot,
-    SourceLanguage, debug::DebugView,
+    SourceLanguage, StepRecord, debug::DebugView,
 };
 
 pub const RUN_INSTRUCTION_BUDGET: u64 = 1_000_000;
@@ -179,6 +179,120 @@ pub struct Session {
     stopped_breakpoint: Option<u64>,
     remaining_budget: u64,
     code_bytes: Vec<u8>,
+    /// Resolved addresses of `view.source_breakpoints`. They are kept apart
+    /// from `view.breakpoints` (the user's instruction breakpoints) so toggling
+    /// either kind never removes the other; execution stops on the union.
+    source_addresses: BTreeSet<u64>,
+    /// Active source-level step, advanced by [`Session::run_batch`].
+    goal: Option<SourceGoal>,
+    /// Current PC, tracked without building snapshots while running.
+    pc: u64,
+    /// True when the machine advanced after `view.snapshot` was taken.
+    stale: bool,
+    /// Replace the halt message with the C exit status at the next refresh.
+    announce_exit: bool,
+}
+
+/// Bookkeeping for a source step in progress.
+struct SourceGoal {
+    kind: SourceStep,
+    /// (file, line) of the user row containing the starting PC.
+    start_line: Option<(u32, u32)>,
+    start_cfa: Option<u64>,
+    /// Step Out: the return address and the CFA of the frame being left.
+    out: Option<(u64, u64)>,
+    /// Register-only shadow updated from step records, so CFA checks never
+    /// need a full machine snapshot.
+    registers: Snapshot,
+}
+
+impl SourceGoal {
+    fn observe(&mut self, record: &StepRecord) {
+        for change in &record.registers {
+            if let Some(register) = self
+                .registers
+                .registers
+                .iter_mut()
+                .find(|register| register.name == change.name)
+            {
+                register.value = change.after;
+            }
+        }
+        self.registers.pc = record.pc_after;
+        let pc_name = pc_register(self.registers.architecture);
+        if let Some(register) = self
+            .registers
+            .registers
+            .iter_mut()
+            .find(|register| register.name == pc_name)
+        {
+            register.value = record.pc_after;
+        }
+    }
+
+    /// Whether the step is complete after `record`, per the source debugging contract.
+    fn reached(&self, debug: &vole_core::DebugInfo, record: &StepRecord) -> bool {
+        let pc = record.pc_after;
+        if let Some((return_address, cfa)) = self.out {
+            return pc == return_address
+                && self
+                    .registers
+                    .register(stack_register(self.registers.architecture))
+                    .is_some_and(|sp| sp >= cfa);
+        }
+        let Some(row) = vole_debug::statement_start(debug, pc) else {
+            return false;
+        };
+        // Entering a function: its first row precedes the prologue, where
+        // locals are unreadable. Continue to the prologue_end row instead.
+        if debug
+            .functions
+            .iter()
+            .any(|f| f.low_pc == pc && f.prologue_end.is_some_and(|end| end > pc))
+        {
+            return false;
+        }
+        let cfa = vole_debug::current_cfa(debug, &self.registers);
+        if self.kind == SourceStep::Over
+            && let (Some(current), Some(start)) = (cfa, self.start_cfa)
+            && current < start
+        {
+            return false;
+        }
+        let backward = record.pc_after <= record.pc_before;
+        Some((row.file, row.line)) != self.start_line || cfa != self.start_cfa || backward
+    }
+}
+
+fn pc_register(architecture: Architecture) -> &'static str {
+    match architecture {
+        Architecture::X86 => "eip",
+        Architecture::X64 => "rip",
+        _ => "pc",
+    }
+}
+
+fn stack_register(architecture: Architecture) -> &'static str {
+    match architecture {
+        Architecture::Arm32 => "r13",
+        Architecture::X86 => "esp",
+        Architecture::X64 => "rsp",
+        _ => "sp",
+    }
+}
+
+fn register_shadow(snapshot: &Snapshot) -> Snapshot {
+    Snapshot {
+        architecture: snapshot.architecture,
+        pc: snapshot.pc,
+        registers: snapshot.registers.clone(),
+        flags: BTreeMap::new(),
+        memory: Vec::new(),
+        output: Vec::new(),
+        halted: false,
+        steps: snapshot.steps,
+        trace: Vec::new(),
+    }
 }
 
 impl Session {
@@ -190,6 +304,11 @@ impl Session {
             stopped_breakpoint: None,
             remaining_budget: RUN_INSTRUCTION_BUDGET,
             code_bytes: Vec::new(),
+            source_addresses: BTreeSet::new(),
+            goal: None,
+            pc: 0,
+            stale: false,
+            announce_exit: false,
         }
     }
 
@@ -197,11 +316,15 @@ impl Session {
         &self.view
     }
 
-    fn mark_assembling(&mut self) {
+    fn mark_assembling(&mut self, language: SourceLanguage) {
         self.view.state = RunState::Assembling;
         self.view.dirty = true;
         self.view.diagnostics.clear();
-        self.view.message = "Assembling source.".into();
+        self.view.message = match language {
+            SourceLanguage::Assembly => "Assembling source.",
+            SourceLanguage::C => "Compiling C source.",
+        }
+        .into();
         self.view.revision += 1;
     }
 
@@ -231,6 +354,14 @@ impl Session {
             self.view.disassembly.clear();
             self.view.debug = None;
             self.machine = None;
+            self.goal = None;
+            self.view.stepping = None;
+            self.source_addresses.clear();
+        }
+        // Source lines keep their meaning across targets, so source
+        // breakpoints survive a rebuild unless the language changes.
+        if self.view.language != language {
+            self.view.source_breakpoints.clear();
         }
         self.view.architecture = architecture;
         self.view.language = language;
@@ -247,26 +378,46 @@ impl Session {
                     1,
                     "C compilation targets ARM32, ARM64, x86 and x64. VOLE programs use VOLE assembly.",
                 )]),
-                (SourceLanguage::C, _) => vole_c::compile(architecture, &source, &settings),
-                (SourceLanguage::Assembly, Architecture::Vole) => vole_isa_vole::assemble(&source),
-                (SourceLanguage::Assembly, _) => vole_isa_scalar::assemble(architecture, &source),
+                (SourceLanguage::C, _) => compile_c(architecture, &source, &settings),
+                (SourceLanguage::Assembly, Architecture::Vole) => {
+                    vole_isa_vole::assemble(&source).map(|program| (program, Vec::new()))
+                }
+                (SourceLanguage::Assembly, _) => vole_isa_scalar::assemble(architecture, &source)
+                    .map(|program| (program, Vec::new())),
             }
         };
-        let result = assembled.and_then(|program| {
-            self.load(program).map_err(|error| {
-                vec![Diagnostic::new(
-                    1,
-                    format!("Executable could not be loaded: {error}"),
-                )]
-            })
+        let result = assembled.and_then(|(program, warnings)| {
+            self.load(program)
+                .map_err(|error| {
+                    vec![Diagnostic::new(
+                        1,
+                        format!("Executable could not be loaded: {error}"),
+                    )]
+                })
+                .map(|()| warnings)
         });
         match result {
-            Ok(()) => Ok(()),
+            Ok(warnings) => {
+                if !warnings.is_empty() {
+                    self.view.message = format!(
+                        "Compiled with {} warning{}. Ready to execute.",
+                        warnings.len(),
+                        if warnings.len() == 1 { "" } else { "s" }
+                    );
+                }
+                self.view.diagnostics = warnings;
+                Ok(())
+            }
             Err(diagnostics) => {
                 let message = diagnostics
-                    .first()
+                    .iter()
+                    .find(|d| d.is_error())
+                    .or(diagnostics.first())
                     .map(|d| format!("Line {}: {}", d.line, d.message))
-                    .unwrap_or_else(|| "Assembly failed.".into());
+                    .unwrap_or_else(|| match language {
+                        SourceLanguage::Assembly => "Assembly failed.".into(),
+                        SourceLanguage::C => "Compilation failed.".into(),
+                    });
                 self.view.diagnostics = diagnostics;
                 self.view.state = RunState::Editing;
                 self.view.dirty = true;
@@ -278,6 +429,7 @@ impl Session {
     }
 
     pub fn load(&mut self, program: Program) -> Result<(), SimError> {
+        validate_image(&program)?;
         let mut machine: Box<dyn Machine> = match program.architecture {
             Architecture::Vole => Box::new(vole_isa_vole::VoleMachine::new()),
             architecture => Box::new(vole_isa_scalar::ScalarMachine::new(architecture)),
@@ -287,10 +439,19 @@ impl Session {
             self.view.breakpoints.clear();
             self.view.watchpoints.clear();
         }
+        if self.view.language != program.language {
+            self.view.source_breakpoints.clear();
+        }
+        if let Some(debug) = &program.debug {
+            self.view.settings = debug.settings.clone();
+        }
         self.view.architecture = program.architecture;
         self.view.source = program.source.clone();
         self.view.language = program.language;
         self.view.program = Some(program);
+        self.view.debug = None;
+        self.view.stepping = None;
+        self.goal = None;
         self.view.state = RunState::Ready;
         self.view.message = "Ready to execute.".into();
         self.view.diagnostics.clear();
@@ -300,11 +461,141 @@ impl Session {
         self.stopped_breakpoint = None;
         self.machine = Some(machine);
         self.code_bytes.clear();
+        self.resolve_source_breakpoints();
         self.refresh();
         Ok(())
     }
 
+    /// Re-resolve source breakpoint lines against the loaded image's line table.
+    fn resolve_source_breakpoints(&mut self) {
+        let debug = self
+            .view
+            .program
+            .as_ref()
+            .and_then(|program| program.debug.as_ref());
+        self.source_addresses.clear();
+        for breakpoint in self.view.source_breakpoints.values_mut() {
+            let resolved =
+                debug.and_then(|debug| vole_debug::breakpoint_address(debug, breakpoint.line));
+            breakpoint.address = resolved.map(|(address, _)| address);
+            breakpoint.resolved_line = resolved.map(|(_, line)| line);
+            if let Some(address) = breakpoint.address {
+                self.source_addresses.insert(address);
+            }
+        }
+    }
+
+    fn is_breakpoint(&self, address: u64) -> bool {
+        self.view.breakpoints.contains(&address) || self.source_addresses.contains(&address)
+    }
+
+    fn breakpoint_message(&self, address: u64) -> String {
+        if !self.view.breakpoints.contains(&address)
+            && let Some(breakpoint) = self
+                .view
+                .source_breakpoints
+                .values()
+                .find(|breakpoint| breakpoint.address == Some(address))
+        {
+            return format!(
+                "Paused at breakpoint on line {}.",
+                breakpoint.resolved_line.unwrap_or(breakpoint.line)
+            );
+        }
+        format!("Paused before breakpoint at {address:X}.")
+    }
+
+    /// Begin a bounded source-level step; [`Session::run_batch`] advances it.
+    fn start_source_step(&mut self, kind: SourceStep) -> Result<(), SimError> {
+        self.ensure_assembled()?;
+        let program = self.view.program.as_ref().ok_or_else(no_machine)?;
+        let Some(debug) = program.debug.as_ref() else {
+            return Err(SimError(
+                "Source stepping needs a compiled C program; use Step for instructions.".into(),
+            ));
+        };
+        if self.view.state == RunState::Running {
+            return Err(SimError("Pause before stepping.".into()));
+        }
+        let snapshot = self.view.snapshot.as_ref().ok_or_else(no_machine)?;
+        if snapshot.halted {
+            return Err(SimError(
+                "Program halted. Reset or reverse before stepping.".into(),
+            ));
+        }
+        let architecture = program.architecture;
+        let start_line = vole_debug::line_at(debug, snapshot.pc)
+            .filter(|row| row.line != 0 && debug.is_user_file(row.file))
+            .map(|row| (row.file, row.line));
+        let start_cfa = vole_debug::current_cfa(debug, snapshot);
+        let out = if kind == SourceStep::Out {
+            let frames = vole_debug::backtrace(debug, architecture, snapshot);
+            let is_user = |frame: &vole_debug::UnwoundFrame| {
+                debug
+                    .function_at(frame.lookup_pc)
+                    .is_some_and(|function| function.user)
+            };
+            // From runtime code, return to the innermost user frame instead.
+            let leave = match frames.iter().position(is_user) {
+                Some(0) | None => 0,
+                Some(user) => user - 1,
+            };
+            let frame = &frames[leave];
+            let return_address = frames.get(leave + 1).map(|caller| caller.pc).or_else(|| {
+                vole_debug::caller_frame(debug, architecture, snapshot, frame)
+                    .map(|caller| caller.pc)
+            });
+            match (return_address, frame.cfa) {
+                (Some(address), Some(cfa)) => Some((address, cfa)),
+                _ => {
+                    return Err(SimError(
+                        "Step Out needs call-frame information at this point; use Step or Run."
+                            .into(),
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        // Without a user line there is nothing to step over: from startup code
+        // `main` itself is a callee. Step Over then behaves like Step Into.
+        let effective = if kind == SourceStep::Over && start_line.is_none() {
+            SourceStep::Into
+        } else {
+            kind
+        };
+        self.goal = Some(SourceGoal {
+            kind: effective,
+            start_line,
+            start_cfa,
+            out,
+            registers: register_shadow(snapshot),
+        });
+        // Leaving a breakpoint location must not stop on that same breakpoint.
+        self.bypass_breakpoint = Some(snapshot.pc);
+        self.stopped_breakpoint = None;
+        self.remaining_budget = RUN_INSTRUCTION_BUDGET;
+        self.view.state = RunState::Running;
+        self.view.stepping = Some(kind);
+        self.view.message = match kind {
+            SourceStep::Into => "Stepping to the next statement.",
+            SourceStep::Over => "Stepping over the current line.",
+            SourceStep::Out => "Running until the current function returns.",
+        }
+        .into();
+        Ok(())
+    }
+
+    /// Run batches until the machine stops. Intended for synchronous callers
+    /// such as tests and the CLI; the worker interleaves batches with commands.
+    pub fn run_to_stop(&mut self) {
+        while self.view.state == RunState::Running {
+            self.run_batch(RUN_BATCH);
+        }
+    }
+
     pub fn apply(&mut self, command: Command) -> Result<(), SimError> {
+        self.sync();
         let result = (|| match command {
             Command::Assemble {
                 architecture,
@@ -316,10 +607,9 @@ impl Session {
                 source,
                 settings,
             } => self.build(architecture, language, source, settings),
-            Command::SourceStep(_) => Err(SimError(
-                "Source stepping is not available for this program yet.".into(),
-            )),
+            Command::SourceStep(kind) => self.start_source_step(kind),
             Command::ToggleSourceBreakpoint(line) => {
+                validate_line(line)?;
                 if self.view.source_breakpoints.remove(&line).is_none() {
                     self.view.source_breakpoints.insert(
                         line,
@@ -330,9 +620,13 @@ impl Session {
                         },
                     );
                 }
+                self.resolve_source_breakpoints();
                 Ok(())
             }
             Command::SetSourceBreakpoints(lines) => {
+                for line in &lines {
+                    validate_line(*line)?;
+                }
                 self.view.source_breakpoints = lines
                     .into_iter()
                     .map(|line| {
@@ -346,6 +640,7 @@ impl Session {
                         )
                     })
                     .collect();
+                self.resolve_source_breakpoints();
                 Ok(())
             }
             Command::LoadProgram(program) => self.load(program),
@@ -365,11 +660,18 @@ impl Session {
                     };
                     staged.view.message =
                         "Restored the saved machine state. New undo history begins here.".into();
+                    // A saved pause resumes like any pause: Run first leaves this
+                    // location even when a breakpoint is set on it.
+                    staged.stopped_breakpoint = Some(snapshot.pc);
                     staged.refresh();
                 }
                 if self.view.architecture == staged.view.architecture {
                     staged.view.breakpoints = self.view.breakpoints.clone();
                     staged.view.watchpoints = self.view.watchpoints.clone();
+                }
+                if self.view.language == staged.view.language {
+                    staged.view.source_breakpoints = self.view.source_breakpoints.clone();
+                    staged.resolve_source_breakpoints();
                 }
                 staged.view.revision = self.view.revision + 1;
                 *self = staged;
@@ -379,7 +681,11 @@ impl Session {
                 self.view.source = source;
                 self.view.dirty = true;
                 self.view.state = RunState::Editing;
-                self.view.message = "Source changed. Assemble before running.".into();
+                self.view.message = match self.view.language {
+                    SourceLanguage::Assembly => "Source changed. Assemble before running.",
+                    SourceLanguage::C => "Source changed. Compile before running.",
+                }
+                .into();
                 Ok(())
             }
             Command::Step => self.step(),
@@ -420,6 +726,8 @@ impl Session {
                         .is_some_and(|s| s.pc == *address)
                 });
                 self.remaining_budget = RUN_INSTRUCTION_BUDGET;
+                self.goal = None;
+                self.view.stepping = None;
                 self.view.state = RunState::Running;
                 self.view.message = "Executing instructions.".into();
                 Ok(())
@@ -428,6 +736,8 @@ impl Session {
                 if self.view.state == RunState::Running {
                     self.view.state = RunState::Paused;
                     self.view.message = "Paused by you.".into();
+                    // Builds the paused source view; the snapshot is already fresh.
+                    self.refresh();
                 }
                 Ok(())
             }
@@ -525,6 +835,10 @@ impl Session {
         if let Err(error) = &result {
             self.view.message = error.to_string();
         }
+        if self.view.state != RunState::Running {
+            self.goal = None;
+            self.view.stepping = None;
+        }
         self.view.revision += 1;
         result
     }
@@ -541,6 +855,7 @@ impl Session {
                     RunState::Paused
                 };
                 self.view.message = if record.halted {
+                    self.announce_exit = true;
                     "Program halted.".into()
                 } else {
                     format!("Executed instruction at {:X}.", record.pc_before)
@@ -558,74 +873,135 @@ impl Session {
     }
 
     /// Advance a running machine for a bounded amount of work, yielding to commands.
+    ///
+    /// Runs and source steps share this loop: breakpoints are checked before
+    /// each instruction, watchpoints and step goals after it using the step
+    /// record, and the published snapshot is rebuilt once at the end.
     pub fn run_batch(&mut self, max_steps: usize) {
+        self.execute_batch(max_steps);
+        self.sync();
+    }
+
+    /// The instruction loop of [`Session::run_batch`] without the final snapshot.
+    fn execute_batch(&mut self, max_steps: usize) {
         let started = Instant::now();
+        let mut last_executed = None;
         for _ in 0..max_steps.min(RUN_BATCH) {
             if self.view.state != RunState::Running {
                 break;
             }
-            let pc = match &self.view.snapshot {
-                Some(snapshot) => snapshot.pc,
-                None => break,
-            };
-            if self.view.breakpoints.contains(&pc) && self.bypass_breakpoint != Some(pc) {
+            let pc = self.pc;
+            if self.is_breakpoint(pc) && self.bypass_breakpoint != Some(pc) {
                 self.view.state = RunState::Paused;
-                self.view.message = format!("Paused before breakpoint at {pc:X}.");
+                self.view.message = self.breakpoint_message(pc);
                 self.stopped_breakpoint = Some(pc);
                 break;
             }
             self.bypass_breakpoint = None;
             if self.remaining_budget == 0 {
                 self.view.state = RunState::Paused;
-                self.view.message = "Instruction budget reached. Run again to continue.".into();
+                self.view.message = if self.goal.is_some() {
+                    "Instruction budget reached before the source step finished. Step again or Run to continue."
+                } else {
+                    "Instruction budget reached. Run again to continue."
+                }
+                .into();
                 break;
             }
-            if self.step().is_err() {
+            let Some(machine) = self.machine.as_mut() else {
                 break;
-            }
+            };
+            self.stopped_breakpoint = None;
+            let record = match machine.step() {
+                Ok(record) => record,
+                Err(error) => {
+                    self.view.state = RunState::Faulted;
+                    self.view.message = error.to_string();
+                    self.stale = true;
+                    break;
+                }
+            };
+            self.stale = true;
+            self.pc = record.pc_after;
             self.remaining_budget -= 1;
-            if self.view.state == RunState::Halted {
+            if record.halted {
+                self.view.state = RunState::Halted;
+                self.view.message = "Program halted.".into();
+                self.announce_exit = true;
                 break;
             }
-            let watched = self
-                .view
-                .snapshot
-                .as_ref()
-                .and_then(|s| s.trace.last())
-                .is_some_and(|record| {
-                    self.view.watchpoints.iter().any(|watch| {
-                        if watch.write {
-                            record.memory.iter().any(|change| {
-                                ranges_overlap(
-                                    watch.address,
-                                    watch.length,
-                                    change.address,
-                                    change.after.len(),
-                                )
-                            })
-                        } else {
-                            record.memory_reads.iter().any(|access| {
-                                ranges_overlap(
-                                    watch.address,
-                                    watch.length,
-                                    access.address,
-                                    access.length,
-                                )
-                            })
-                        }
-                    })
-                });
-            if watched {
+            if self.watchpoint_hit(&record) {
                 self.view.state = RunState::Paused;
-                self.view.message = format!("Watchpoint accessed by instruction at {pc:X}.");
+                self.view.message = format!(
+                    "Watchpoint accessed by instruction at {:X}.",
+                    record.pc_before
+                );
                 break;
             }
-            self.view.state = RunState::Running;
+            if let Some(goal) = &mut self.goal {
+                goal.observe(&record);
+                let debug = self
+                    .view
+                    .program
+                    .as_ref()
+                    .and_then(|program| program.debug.as_ref());
+                if debug.is_some_and(|debug| goal.reached(debug, &record)) {
+                    let line = debug
+                        .and_then(|debug| {
+                            vole_debug::line_at(debug, record.pc_after)
+                                .filter(|row| debug.is_user_file(row.file))
+                        })
+                        .map(|row| row.line);
+                    self.view.state = RunState::Paused;
+                    self.view.message = match line {
+                        Some(line) => format!("Stepped to line {line}."),
+                        None => format!("Stepped to {:X}.", record.pc_after),
+                    };
+                    // Run from here continues past a breakpoint at this address.
+                    if self.is_breakpoint(record.pc_after) {
+                        self.stopped_breakpoint = Some(record.pc_after);
+                    }
+                    break;
+                }
+            }
+            last_executed = Some(record.pc_before);
             if started.elapsed() >= Duration::from_millis(8) {
                 break;
             }
         }
+        if self.view.state == RunState::Running
+            && self.goal.is_none()
+            && let Some(pc) = last_executed
+        {
+            self.view.message = format!("Executed instruction at {pc:X}.");
+        }
         self.view.revision += 1;
+    }
+
+    fn watchpoint_hit(&self, record: &StepRecord) -> bool {
+        self.view.watchpoints.iter().any(|watch| {
+            if watch.write {
+                record.memory.iter().any(|change| {
+                    ranges_overlap(
+                        watch.address,
+                        watch.length,
+                        change.address,
+                        change.after.len(),
+                    )
+                })
+            } else {
+                record.memory_reads.iter().any(|access| {
+                    ranges_overlap(watch.address, watch.length, access.address, access.length)
+                })
+            }
+        })
+    }
+
+    /// Rebuild the published snapshot if the machine advanced since the last one.
+    fn sync(&mut self) {
+        if self.stale {
+            self.refresh();
+        }
     }
 
     fn validate_address(&self, address: u64) -> Result<(), SimError> {
@@ -643,7 +1019,11 @@ impl Session {
     fn ensure_assembled(&self) -> Result<(), SimError> {
         if self.view.dirty {
             Err(SimError(
-                "Assemble the current source before executing.".into(),
+                match self.view.language {
+                    SourceLanguage::Assembly => "Assemble the current source before executing.",
+                    SourceLanguage::C => "Compile the current source before executing.",
+                }
+                .into(),
             ))
         } else if self.machine.is_none() {
             Err(no_machine())
@@ -701,6 +1081,23 @@ impl Session {
                 }
                 instruction
             });
+            if self.view.state != RunState::Running {
+                // Paused observations only; `changed` compares with the last one.
+                let previous = self.view.debug.take();
+                self.view.debug = self.view.program.as_ref().and_then(|program| {
+                    vole_debug::debug_view(program, &snapshot, previous.as_ref())
+                });
+                self.goal = None;
+                self.view.stepping = None;
+            }
+            if std::mem::take(&mut self.announce_exit)
+                && self.view.state == RunState::Halted
+                && let Some(status) = self.view.debug.as_ref().and_then(|d| d.exit_status)
+            {
+                self.view.message = format!("Program exited with status {status}.");
+            }
+            self.pc = snapshot.pc;
+            self.stale = false;
             self.view.snapshot = Some(snapshot);
             self.view.revision += 1;
         }
@@ -709,6 +1106,38 @@ impl Session {
 
 fn no_machine() -> SimError {
     SimError("Assemble or load a program first.".into())
+}
+
+fn validate_line(line: usize) -> Result<(), SimError> {
+    if line == 0 || line > 1_000_000 {
+        Err(SimError("Source breakpoint line is invalid.".into()))
+    } else {
+        Ok(())
+    }
+}
+
+/// Checks that keep the debugger's table lookups meaningful for saved C images.
+fn validate_image(program: &Program) -> Result<(), SimError> {
+    match (program.language, &program.debug) {
+        (SourceLanguage::C, _) if program.architecture == Architecture::Vole => {
+            Err(SimError("C images target ARM32, ARM64, x86 or x64.".into()))
+        }
+        (SourceLanguage::C, None) => Err(SimError(
+            "C image is missing its debug information. Rebuild the document.".into(),
+        )),
+        (_, Some(debug)) => vole_debug::validate(debug)
+            .map_err(|error| SimError(format!("Invalid debug information: {error}"))),
+        (SourceLanguage::Assembly, None) => Ok(()),
+    }
+}
+
+/// Compile a C document, returning the image and any warnings or notes.
+fn compile_c(
+    architecture: Architecture,
+    source: &str,
+    settings: &CompilerSettings,
+) -> Result<(Program, Vec<Diagnostic>), Vec<Diagnostic>> {
+    vole_c::compile_with_warnings(architecture, source, settings)
 }
 
 fn live_disassembly(program: &Program, snapshot: &Snapshot) -> Vec<Instruction> {
@@ -953,7 +1382,7 @@ impl Runtime {
             .name("vole-runtime".into())
             .spawn(move || {
                 let mut session = Session::new(architecture, source.clone());
-                session.mark_assembling();
+                session.mark_assembling(SourceLanguage::Assembly);
                 publish(&worker_view, &session);
                 let _ = session.assemble(architecture, source);
                 publish(&worker_view, &session);
@@ -967,10 +1396,16 @@ impl Runtime {
                     match receiver.recv_timeout(wait) {
                         Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Ok(command) => {
-                            if matches!(&command, Command::Assemble { .. } | Command::Build { .. })
-                            {
-                                session.mark_assembling();
-                                publish(&worker_view, &session);
+                            match &command {
+                                Command::Assemble { .. } => {
+                                    session.mark_assembling(SourceLanguage::Assembly);
+                                    publish(&worker_view, &session);
+                                }
+                                Command::Build { language, .. } => {
+                                    session.mark_assembling(*language);
+                                    publish(&worker_view, &session);
+                                }
+                                _ => {}
                             }
                             let _ = session.apply(command);
                             publish(&worker_view, &session);
@@ -979,10 +1414,12 @@ impl Runtime {
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
                     if session.view.state == RunState::Running {
-                        session.run_batch(RUN_BATCH);
+                        // Snapshots are only rebuilt when they are published.
+                        session.execute_batch(RUN_BATCH);
                         if session.view.state != RunState::Running
                             || last_publish.elapsed() >= Duration::from_millis(16)
                         {
+                            session.sync();
                             publish(&worker_view, &session);
                             last_publish = Instant::now();
                         }

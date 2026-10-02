@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and launch a local macOS app bundle with its guest assembler tools."""
+"""Build and launch a local macOS app bundle with its guest assembler and C compiler tools."""
 import argparse
 import json
 import os
@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ("llvm-mc", "ld.lld", "llvm-objdump")
+TOOLS = ("llvm-mc", "ld.lld", "llvm-objdump", "clang")
 
 
 def run(args, environment, capture=False):
@@ -67,7 +67,7 @@ def guest_tools(environment):
             folder = folder / "bin"
     paths = {}
     for name in TOOLS:
-        override = {"llvm-mc": "VOLE_LLVM_MC", "ld.lld": "VOLE_LLD"}.get(name)
+        override = {"llvm-mc": "VOLE_LLVM_MC", "ld.lld": "VOLE_LLD", "clang": "VOLE_CLANG"}.get(name)
         explicit = environment.get(override) if override else None
         tool = Path(explicit).expanduser().absolute() if explicit else (folder / name if folder else require_tool(name, environment))
         if not tool.is_file() or not os.access(tool, os.X_OK):
@@ -139,7 +139,13 @@ def preflight(environment, install_metal=False):
     tools = guest_tools(environment)
     environment["VOLE_LLVM_MC"] = str(tools["llvm-mc"])
     environment["VOLE_LLD"] = str(tools["ld.lld"])
-    print(f"Ready: {match.group(1)}, Xcode/Metal, Rust and LLVM guest tools.", flush=True)
+    environment["VOLE_CLANG"] = str(tools["clang"])
+    # Apple's Xcode clang cannot build the guest ELF images; Homebrew LLVM's clang can.
+    version = run([tools["clang"], "--version"], environment, capture=True)
+    if "Apple" in (version.splitlines() or [""])[0]:
+        raise RuntimeError(f"{tools['clang']} is Apple clang. Run make mac-setup to install Homebrew LLVM, "
+                           "or set VOLE_CLANG to an LLVM clang 14+.")
+    print(f"Ready: {match.group(1)}, Xcode/Metal, Rust, LLVM guest tools and Clang.", flush=True)
     return tools
 
 
@@ -174,7 +180,7 @@ def build(environment, tools, profile):
             tool_launcher(tool, resource_dir / "toolchain" / name)
         local_env = environment.copy()
         local_env["PATH"] = "/usr/bin:/bin"
-        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR"]:
+        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR", "VOLE_CLANG"]:
             local_env.pop(variable, None)
         for name in TOOLS:
             try:
@@ -221,7 +227,7 @@ def main():
         run(["open", "-n", app], env)
     elif args.action == "verify":
         # Exercise tools inside the bundle rather than developer tool overrides.
-        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR"]:
+        for variable in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR", "VOLE_CLANG"]:
             env.pop(variable, None)
         env["PATH"] = "/usr/bin:/bin"
         run([sys.executable, ROOT / "scripts/verify-engines.py", "--binary", app / "Contents/MacOS/vole-cli",

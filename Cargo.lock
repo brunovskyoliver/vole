@@ -1723,6 +1723,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fallible-iterator"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
+
+[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2154,6 +2160,10 @@ name = "gimli"
 version = "0.32.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e629b9b98ef3dd8afe6ca2bd0f89306cec16d43d907889945bc5d6687f2f13c7"
+dependencies = [
+ "fallible-iterator",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "gl_generator"
@@ -7324,6 +7334,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "vole-c",
  "vole-core",
  "vole-project",
  "vole-runtime",
@@ -7333,6 +7344,9 @@ dependencies = [
 name = "vole-c"
 version = "0.1.0"
 dependencies = [
+ "gimli",
+ "object",
+ "tempfile",
  "vole-core",
  "vole-isa-scalar",
 ]
@@ -7358,7 +7372,9 @@ dependencies = [
 name = "vole-debug"
 version = "0.1.0"
 dependencies = [
+ "vole-c",
  "vole-core",
+ "vole-isa-scalar",
 ]
 
 [[package]]
@@ -7393,11 +7409,13 @@ name = "vole-runtime"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "tempfile",
  "vole-c",
  "vole-core",
  "vole-debug",
  "vole-isa-scalar",
  "vole-isa-vole",
+ "vole-project",
 ]
 
 [[package]]

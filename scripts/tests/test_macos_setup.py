@@ -82,12 +82,12 @@ class MacSetupTests(unittest.TestCase):
         folder = self.fixture / "bin"
         folder.mkdir()
         for name in ["uname", "brew", "rustup", "xcodebuild", "xcrun", "python3", "cargo", "rustc",
-                     "cmake", "pkg-config", "codesign", "open", "llvm-mc", "ld.lld", "llvm-objdump"]:
+                     "cmake", "pkg-config", "codesign", "open", "llvm-mc", "ld.lld", "llvm-objdump", "clang"]:
             executable = folder / name
             executable.write_text(f"#!{sys.executable}\n" + DRIVER)
             executable.chmod(0o755)
         self.environment = os.environ.copy()
-        for name in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_TOOLCHAIN_DIR", "CARGO_BUILD_TARGET", "DEVELOPER_DIR", "TOOLCHAINS"]:
+        for name in ["VOLE_LLVM_MC", "VOLE_LLD", "VOLE_CLANG", "VOLE_TOOLCHAIN_DIR", "CARGO_BUILD_TARGET", "DEVELOPER_DIR", "TOOLCHAINS"]:
             self.environment.pop(name, None)
         for name in ["VOLE_SETUP_DOWNLOAD_FAIL", "VOLE_SETUP_CACHE_STALE", "VOLE_SETUP_STILL_MISSING"]:
             self.environment.pop(name, None)

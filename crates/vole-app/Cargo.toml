@@ -12,6 +12,7 @@ gpui-log = { package = "gpui-pre-zlog", version = "=0.3.7" }
 vole-core.workspace = true
 vole-runtime.workspace = true
 vole-project.workspace = true
+vole-c.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile = "3.27"

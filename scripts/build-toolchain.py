@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the same file-local LLVM assembler/linker on every release host."""
+"""Build the same guest assembler, C compiler and linker on every release host."""
 import argparse
 import json
 import os
@@ -18,6 +18,11 @@ def run(*args):
     subprocess.run(list(map(str, args)), check=True)
 
 
+def resource_headers(prefix):
+    """Clang's freestanding headers, found from bin/clang as ../lib/clang/<major>/include."""
+    return prefix / "lib" / "clang" / LLVM_VERSION.split(".")[0] / "include" / "stddef.h"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prefix", type=Path, default=ROOT / "target/toolchain")
@@ -33,7 +38,8 @@ def main():
     extension = ".exe" if os.name == "nt" else ""
     manifest = prefix / "manifest.json"
     if manifest.exists() and json.loads(manifest.read_text())["commit"] == LLVM_COMMIT:
-        if all((prefix / "bin" / (tool + extension)).is_file() for tool in ["llvm-mc", "ld.lld", "llvm-objdump"]):
+        if all((prefix / "bin" / (tool + extension)).is_file() for tool in ["llvm-mc", "ld.lld", "llvm-objdump", "clang"]) \
+                and resource_headers(prefix).is_file():
             print(f"Pinned LLVM {LLVM_VERSION} toolchain already built at {prefix}")
             return
     source = build_root / "source"
@@ -45,29 +51,38 @@ def main():
         run("git", "-C", source, "config", "core.longpaths", "true")
     run("git", "-C", source, "fetch", "--depth=1", "origin", LLVM_COMMIT)
     run("git", "-C", source, "sparse-checkout", "init", "--cone")
-    run("git", "-C", source, "sparse-checkout", "set", "llvm", "lld", "cmake", "third-party")
+    run("git", "-C", source, "sparse-checkout", "set", "llvm", "lld", "clang", "cmake", "third-party")
     run("git", "-C", source, "checkout", "--detach", LLVM_COMMIT)
     build = build_root / "build"
     options = [
-        "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_PROJECTS=lld",
+        "-G", "Ninja", "-DCMAKE_BUILD_TYPE=Release", "-DLLVM_ENABLE_PROJECTS=clang;lld",
         "-DLLVM_TARGETS_TO_BUILD=AArch64;ARM;X86", "-DLLVM_ENABLE_ASSERTIONS=OFF",
         "-DLLVM_INCLUDE_TESTS=OFF", "-DLLVM_INCLUDE_BENCHMARKS=OFF", "-DLLVM_INCLUDE_EXAMPLES=OFF",
         "-DLLVM_ENABLE_TERMINFO=OFF", "-DLLVM_ENABLE_ZLIB=OFF", "-DLLVM_ENABLE_ZSTD=OFF",
         "-DLLVM_ENABLE_LIBXML2=OFF", "-DLLVM_BUILD_LLVM_DYLIB=OFF", "-DLLVM_LINK_LLVM_DYLIB=OFF",
         "-DLLVM_PARALLEL_LINK_JOBS=1", "-DLLVM_USE_CRT_RELEASE=MT",
+        # The C compiler only needs its driver, code generation and resource headers.
+        "-DCLANG_ENABLE_STATIC_ANALYZER=OFF", "-DCLANG_ENABLE_ARCMT=OFF",
+        "-DCLANG_BUILD_TOOLS=OFF", "-DCLANG_INCLUDE_DOCS=OFF", "-DCLANG_PLUGIN_SUPPORT=OFF",
+        "-DCLANG_DEFAULT_LINKER=lld", "-DLIBCLANG_BUILD_STATIC=OFF",
     ]
     if sys.platform == "darwin":
         options.append("-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0")
     run("cmake", "-S", source / "llvm", "-B", build, *options)
-    run("cmake", "--build", build, "--parallel", args.jobs, "--target", "llvm-mc", "lld", "llvm-objdump")
+    run("cmake", "--build", build, "--parallel", args.jobs, "--target", "llvm-mc", "lld", "llvm-objdump", "clang", "clang-resource-headers")
     binaries = prefix / "bin"
     binaries.mkdir(parents=True, exist_ok=True)
-    for name, built in [("llvm-mc", "llvm-mc"), ("ld.lld", "lld"), ("llvm-objdump", "llvm-objdump")]:
+    for name, built in [("llvm-mc", "llvm-mc"), ("ld.lld", "lld"), ("llvm-objdump", "llvm-objdump"), ("clang", "clang")]:
         shutil.copy2(build / "bin" / (built + extension), binaries / (name + extension))
         run(binaries / (name + extension), "--version")
+    # Keep the installed layout so clang finds its headers without extra flags.
+    headers = resource_headers(prefix).parent
+    if headers.exists():
+        shutil.rmtree(headers)
+    shutil.copytree(build / "lib" / "clang" / LLVM_VERSION.split(".")[0] / "include", headers)
     licenses = prefix / "licenses"
     licenses.mkdir(exist_ok=True)
-    for name in ["llvm", "lld", "third-party"]:
+    for name in ["llvm", "lld", "clang", "third-party"]:
         for pattern in ["LICENSE*", "COPYING*", "NOTICE*"]:
             for file in (source / name).rglob(pattern):
                 if file.is_file():
@@ -76,7 +91,8 @@ def main():
                     shutil.copy2(file, destination)
     manifest.write_text(json.dumps({"version": LLVM_VERSION, "commit": LLVM_COMMIT,
         "source": f"https://github.com/llvm/llvm-project/tree/{LLVM_COMMIT}",
-        "targets": ["AArch64", "ARM", "X86"], "dynamic_llvm_library": False}, indent=2) + "\n")
+        "targets": ["AArch64", "ARM", "X86"], "tools": ["llvm-mc", "ld.lld", "llvm-objdump", "clang"],
+        "clang_resource_headers": str(resource_headers(prefix).parent.relative_to(prefix)), "dynamic_llvm_library": False}, indent=2) + "\n")
     if args.clean_build:
         shutil.rmtree(build_root)
     print(f"Built release toolchain at {prefix}")
