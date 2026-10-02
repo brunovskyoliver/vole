@@ -77,7 +77,44 @@ def guest_tools(environment):
     return paths
 
 
-def preflight(environment):
+def ensure_metal(environment, install=False):
+    def check():
+        for tool in ["metal", "metallib"]:
+            run(["xcrun", "--sdk", "macosx", "--find", tool], environment, capture=True)
+        # Newer Xcode can locate a forwarding stub without its component.
+        run(["xcrun", "--sdk", "macosx", "metal", "--version"], environment, capture=True)
+
+    try:
+        check()
+        return
+    except subprocess.CalledProcessError:
+        # Tool discovery can remain stale after an Xcode/component update.
+        run(["xcrun", "--kill-cache"], environment, capture=True)
+    try:
+        check()
+        return
+    except subprocess.CalledProcessError as error:
+        if not install:
+            detail = (error.stderr or error.stdout or "").strip()
+            raise RuntimeError("Xcode's Metal component is unavailable. Run make mac-setup to install it, "
+                               "or run xcodebuild -downloadComponent MetalToolchain.\n" + detail) from error
+
+    print("Installing Xcode's Metal toolchain for GPUI shader compilation...", flush=True)
+    try:
+        run(["xcodebuild", "-downloadComponent", "MetalToolchain"], environment)
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Metal component download failed. Retry xcodebuild -downloadComponent MetalToolchain "
+                           "or install Metal Toolchain in Xcode Settings > Components, then rerun make mac-setup.") from error
+    run(["xcrun", "--kill-cache"], environment, capture=True)
+    try:
+        check()
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()
+        raise RuntimeError("Metal component installation completed, but Xcode still cannot resolve its tools. "
+                           "Check xcodebuild -showComponent MetalToolchain and the selected Xcode installation.\n" + detail) from error
+
+
+def preflight(environment, install_metal=False):
     if platform.system() != "Darwin":
         raise RuntimeError("These build commands require macOS. Use cargo run -p vole-app on Linux/Windows.")
     if sys.version_info < (3, 11):
@@ -86,14 +123,12 @@ def preflight(environment):
         require_tool(tool, environment)
     try:
         run(["xcodebuild", "-version"], environment, capture=True)
-        for tool in ["clang", "metal", "metallib"]:
-            run(["xcrun", "--sdk", "macosx", "--find", tool], environment, capture=True)
-        run(["xcrun", "--sdk", "macosx", "metal", "--version"], environment, capture=True)
+        run(["xcrun", "--sdk", "macosx", "--find", "clang"], environment, capture=True)
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip()
-        raise RuntimeError("Full Xcode with Metal tools is required. Open Xcode to finish setup; "
-                           "if Metal is missing, run xcodebuild -downloadComponent MetalToolchain. "
+        raise RuntimeError("Full Xcode with the macOS SDK is required. Open Xcode to finish setup. "
                            "Select Xcode using xcode-select if only Command Line Tools are active.\n" + detail) from error
+    ensure_metal(environment, install=install_metal)
     host = run(["rustc", "-vV"], environment, capture=True)
     match = re.search(r"^host: (.+)$", host, flags=re.MULTILINE)
     if not match or match.group(1) not in {"aarch64-apple-darwin", "x86_64-apple-darwin"}:
@@ -168,12 +203,12 @@ def build(environment, tools, profile):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["check", "build", "run", "verify"])
+    parser.add_argument("action", choices=["setup", "check", "build", "run", "verify"])
     parser.add_argument("--profile", choices=["debug", "release"], default="debug")
     args = parser.parse_args()
     env = environment()
-    tools = preflight(env)
-    if args.action == "check":
+    tools = preflight(env, install_metal=True) if args.action == "setup" else preflight(env)
+    if args.action in {"setup", "check"}:
         return
     if args.action == "verify":
         run(["cargo", "fmt", "--all", "--check"], env)

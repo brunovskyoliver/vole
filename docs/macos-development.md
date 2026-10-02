@@ -19,7 +19,10 @@ make mac-run
 `mac-setup` installs Homebrew Python, CMake, Ninja, pkgconf, LLVM and LLD, and
 the repository's pinned Rust toolchain with rustfmt and Clippy. It installs
 Homebrew rustup if no existing rustup is available. It does not change your
-global Rust default. LLVM and LLD are separate Homebrew formulae; their paths
+global Rust default. If Metal tools are missing, it clears the `xcrun` discovery
+cache, downloads Xcode's Metal Toolchain component and checks both `metal` and
+`metallib` again. A failed download or unresolved tool remains a setup failure.
+LLVM and LLD are separate Homebrew formulae; their paths
 are discovered without requiring changes to your shell profile.
 [LLVM formula](https://formulae.brew.sh/formula/llvm),
 [LLD formula](https://formulae.brew.sh/formula/lld),
@@ -59,7 +62,15 @@ If Xcode is installed but its developer directory is not selected:
 sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
 ```
 
-If the Metal tools are missing, install the additional component and retry:
+If you cloned before Metal component installation was added to setup:
+
+```sh
+git pull --ff-only
+make mac-setup
+make mac-run
+```
+
+To install the additional component manually and retry:
 
 ```sh
 xcodebuild -downloadComponent MetalToolchain

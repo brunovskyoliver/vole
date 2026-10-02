@@ -69,7 +69,7 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: macOS build orchestration tests
-        run: python -m unittest discover -s scripts/tests -p test_macos.py -v
+        run: python -m unittest discover -s scripts/tests -p 'test_macos*.py' -v
       - name: Public interface and guest tests
         run: cargo test --workspace --locked
       - name: Lint

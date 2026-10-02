@@ -38,4 +38,4 @@ cd "$project_root"
 toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 [[ -n "$toolchain" ]] || { echo 'Cannot read the pinned Rust toolchain.' >&2; exit 1; }
 rustup toolchain install "$toolchain" --profile minimal --component rustfmt,clippy
-python3 scripts/macos.py check
+python3 scripts/macos.py setup

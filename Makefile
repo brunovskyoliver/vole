@@ -7,7 +7,7 @@ PROFILE ?= debug
 
 help:
 	@printf '%s\n' \
-	  'mac-setup  Install Homebrew dependencies and the pinned Rust toolchain' \
+	  'mac-setup  Install dependencies, pinned Rust and missing Xcode Metal tools' \
 	  'mac-check  Check Xcode, Metal, Rust and guest assembler tools' \
 	  'mac-build  Build target/macos/$(PROFILE)/Vole.app' \
 	  'mac-run    Build and launch a new Vole.app instance' \
@@ -31,4 +31,4 @@ mac-verify:
 	"$(PYTHON)" scripts/macos.py verify --profile "$(PROFILE)"
 
 test-macos-script:
-	"$(PYTHON)" -m unittest discover -s scripts/tests -p 'test_macos.py' -v
+	"$(PYTHON)" -m unittest discover -s scripts/tests -p 'test_macos*.py' -v
