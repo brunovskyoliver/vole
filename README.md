@@ -31,6 +31,17 @@ workflows are configured; their native runtime checks are still unverified.
 
 ## Run
 
+On a Mac with full Xcode and Homebrew installed:
+
+```sh
+make mac-setup
+make mac-run
+```
+
+This builds and opens a native `Vole.app` for your Mac. See
+[macOS development commands](docs/macos-development.md) for optimized builds,
+verification and Metal toolchain setup.
+
 Install Rust with rustup. The repository pins Rust 1.99.0 and its formatting
 and lint components. On Debian/Ubuntu, `bash scripts/setup-linux.sh` installs
 native build/graphics tools and LLVM. macOS needs Xcode and its command-line
@@ -95,8 +106,8 @@ python3 scripts/package.py --toolchain-dir dist/llvm-toolchain
 The packager builds a native portable archive, bundles tools/notices, and runs
 all five guest examples and raw-byte round trips through the packaged CLI.
 Release workflows upload artifacts without publishing releases. Public macOS
-signing/notarization requires owner credentials. No remote repository or PR
-has been created for this local project.
+signing/notarization requires owner credentials. The source repository is
+[brunovskyoliver/vole](https://github.com/brunovskyoliver/vole).
 
 ## Foundation
 

@@ -66,6 +66,8 @@ the [native acceptance checks](native-verification.md). Windows DPI scaling,
 native controls and install/launch/save/reopen also need host verification.
 Linux ARM64 and Windows ARM64 host packages are not part of this first matrix.
 
-No remote repository or PR has been created. Signing and notarization remain
-owner-controlled release steps. Full ISA support, privileged/OS execution,
+The repository is published at [brunovskyoliver/vole](https://github.com/brunovskyoliver/vole).
+[Makefile commands](macos-development.md) build and launch a local macOS app
+bundle. Signing and notarization remain owner-controlled release steps.
+Full ISA support, privileged/OS execution,
 SIMD, cycle timing and higher-level compilation are outside this release.
