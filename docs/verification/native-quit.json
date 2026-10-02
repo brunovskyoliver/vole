@@ -1,0 +1,14 @@
+{
+  "platform": "Linux X11, native GPUI window",
+  "binary_sha256": "b99f8ae983a19c863c861aa1b9989e6b51d8265a9fd2208a2b9ed105c2517dc9",
+  "observed_passes": [
+    "Editor-focused Ctrl+Q opens dark unsaved-changes prompt",
+    "Escape cancels and preserves edited source",
+    "Second Ctrl+Q, Tab, Return selects Discard and exits process/window"
+  ],
+  "screenshots": [
+    "screenshots/quit-prompt.png",
+    "screenshots/quit-cancel.png"
+  ],
+  "scope": "Latest window-local Quit handler. Native macOS no-window app-menu fallback remains host-dependent acceptance."
+}

@@ -1,0 +1,24 @@
+[package]
+name = "vole-app"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+gpui.workspace = true
+gpui-platform.workspace = true
+gpui-kit.workspace = true
+gpui-log = { package = "gpui-pre-zlog", version = "=0.3.7" }
+vole-core.workspace = true
+vole-runtime.workspace = true
+vole-project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile = "3.27"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "vole"
+path = "src/main.rs"

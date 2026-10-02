@@ -1,0 +1,51 @@
+{
+  "version": "0.1.0",
+  "host": "linux",
+  "architecture": "x64",
+  "rust_dependencies": 854,
+  "guest_smoke": {
+    "vole": {
+      "halted": true,
+      "steps": 5,
+      "register": "r3",
+      "result": 125,
+      "memory_address": 187
+    },
+    "arm32": {
+      "halted": true,
+      "steps": 6,
+      "register": "r3",
+      "result": 125,
+      "memory_address": 8192
+    },
+    "arm64": {
+      "halted": true,
+      "steps": 6,
+      "register": "x3",
+      "result": 125,
+      "memory_address": 8192
+    },
+    "x86": {
+      "halted": true,
+      "steps": 5,
+      "register": "eax",
+      "result": 125,
+      "memory_address": 8192
+    },
+    "x64": {
+      "halted": true,
+      "steps": 5,
+      "register": "rax",
+      "result": 125,
+      "memory_address": 8192
+    }
+  },
+  "engine_roundtrips_verified": true,
+  "native_window_verified": false,
+  "build_host": "Linux-6.1.0-52-amd64-x86_64-with-glibc2.36",
+  "c_runtime": [
+    "glibc",
+    "2.36"
+  ],
+  "note": "Guest smoke checks do not establish native window behavior or distribution signing."
+}

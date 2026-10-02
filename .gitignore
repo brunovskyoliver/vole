@@ -1,0 +1,18 @@
+# Rust build outputs; retain Cargo.lock once the app workspace exists.
+/target/
+**/target/
+
+# Local tooling and OS metadata.
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local credentials and generated release artifacts.
+.env
+.env.*
+!.env.example
+/dist/
+/coverage/
+__pycache__/
+*.pyc

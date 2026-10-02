@@ -1,0 +1,23 @@
+{
+  "platform": "Linux x64 X11/Openbox/Xvfb/Mesa llvmpipe Vulkan",
+  "native_dialogs": "xdg-desktop-portal GTK under private dbus-run-session",
+  "observed_passes": [
+    "F10 PC04->06 and R3=7D",
+    "ShiftF10 reverses step",
+    "Run addition halts with R3=125 and memoryBB=125",
+    "Native Save/Open path containing spaces restores PC/registers/memory/steps",
+    "RegisterR3 edit7F updates numeric inspector and clears history",
+    "MemoryBB edit7D updates numeric/ASCII inspector",
+    "Editor typing+CtrlEnter invalidR10 reports Line1 diagnostic, disables Run",
+    "Correctedsource CtrlEnter reassembles",
+    "F5 Run/Pause loop paused at3498steps",
+    "F9+Reset+Run stopsbeforebreakpoint00 with0steps",
+    "Close prompt Cancel preserves edited source",
+    "MemoryBB write watchpoint toggles Remove write watchpoint",
+    "Saved vertical pane preference0.65 restores visible divider and re-saves within0.015"
+  ],
+  "scope": "Observed actions on development binary; final dark prompt and responsive matrix reviewed separately. Host-dependent macOS/Windows checks remain unverified.",
+  "interaction_batch_sha256": "09624cc077b4738c324a14e74bb45e74cd4a882616df3805382d805e67135c63",
+  "build_scope": "Several iterative development builds were exercised. This hash identifies the primary interaction batch; final package receipts identify the final packaged binary separately.",
+  "pane_restore_build_sha256": "4c8128429066e8ab1798bae658300bb1a264ec341cad7c3b526ecf45316bd2bf"
+}

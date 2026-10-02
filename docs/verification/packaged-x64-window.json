@@ -1,0 +1,81 @@
+{
+  "platform": "linux-x11",
+  "binary": "/home/brunovsky/.t3/projects/vole/dist/vole-0.1.0-linux-x64/vole",
+  "binary_sha256": "7d77bfd6ce8be2b09655f79bf5fcab96c070b0922ecc902d1de98cdccf1d13e3",
+  "architecture": "x64",
+  "time_utc": "2026-10-02T21:43:31.163952+00:00",
+  "demo_initial_steps": 2,
+  "startup_wait_seconds": 8,
+  "bundled_toolchain_environment": true,
+  "success": true,
+  "normal_window": true,
+  "captures": [
+    {
+      "requested_width": 1440,
+      "requested_height": 940,
+      "screenshot": "workbench-1440x940.png"
+    },
+    {
+      "requested_width": 1280,
+      "requested_height": 800,
+      "screenshot": "workbench-1280x800.png"
+    },
+    {
+      "requested_width": 1100,
+      "requested_height": 760,
+      "screenshot": "workbench-1100x760.png"
+    },
+    {
+      "requested_width": 850,
+      "requested_height": 650,
+      "screenshot": "workbench-850x650.png"
+    },
+    {
+      "requested_width": 720,
+      "requested_height": 520,
+      "screenshot": "workbench-720x520.png"
+    }
+  ],
+  "capture_method": "Composed root surface cropped to xwininfo absolute client geometry, with owned window raised",
+  "keyboard_actions_sent": [
+    "F10",
+    "F10",
+    "F10",
+    "Shift+F10"
+  ],
+  "keyboard_delivery": "XTest events after owned-window activation and active-window ID verification",
+  "keyboard_observations": [
+    {
+      "expected_instruction_count": 2,
+      "observed_instruction_count": 2,
+      "observed_footer": "Paused before 000000000000100E - Executed instruction at 1007. 2instructions Selected 9000000000001000 100% #\u00a3Help",
+      "screenshot": "before-steps.png"
+    },
+    {
+      "expected_instruction_count": 3,
+      "observed_instruction_count": 3,
+      "observed_footer": "Paused before 0000000000001011 - Executed instruction at 100E. 3 instructions Selected 9000000000001000 100% #\u00a3Help",
+      "screenshot": "after-step-3.png"
+    },
+    {
+      "expected_instruction_count": 4,
+      "observed_instruction_count": 4,
+      "observed_footer": "Paused before 0000000000001019 - Executed instruction at 1011. 4instructions Selected 9000000000001000 100% #\u00a3Help",
+      "screenshot": "after-step-4.png"
+    },
+    {
+      "expected_instruction_count": 5,
+      "observed_instruction_count": 5,
+      "observed_footer": "Program halted. Sinstructions Selected 9Q00000000001000 100% #\u00a3Help",
+      "screenshot": "after-three-steps.png"
+    },
+    {
+      "expected_instruction_count": 4,
+      "observed_instruction_count": 4,
+      "observed_footer": "Paused before 0000000000001019 - Restored the previous instruction state. 4instructions Selected 9000000000001000 100% #\u00a3Help",
+      "screenshot": "after-reverse.png"
+    }
+  ],
+  "visual_review": "Required: inspect screenshots for clipping, pane alignment, text contrast and state changes.",
+  "limits": "Virtual X11 display. Physical GPU, Wayland, native file dialogs and other OSes need separate acceptance."
+}

@@ -1,0 +1,2 @@
+    Checking vole-app v0.1.0 (/home/brunovsky/.t3/projects/vole/crates/vole-app)
+    Finished `dev` profile [unoptimized] target(s) in 2.49s

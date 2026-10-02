@@ -1,0 +1,480 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="940" viewBox="0 0 1440 940" role="img" aria-labelledby="title desc">
+  <title id="title">Vole dark GPUI workbench proposal</title>
+  <desc id="desc">Static design proposal. A VOLE program is paused before adding registers R1 and R2 into R3. Assembly, instructions, decoded nibbles, registers, complete main memory and trace are visible.</desc>
+  <style>
+    text {font-family: 'IBM Plex Sans', 'DejaVu Sans', sans-serif; fill:#E3EAF3; font-size:14px}
+    .mono {font-family:'IBM Plex Mono', 'DejaVu Sans Mono', monospace}
+    .muted {fill:#E3EAF3; opacity:.72}
+    .small {font-size:12px}
+    .read {fill:#9CC8F4}
+    .write {fill:#E4B48B}
+  </style>
+
+<rect x="0" y="0" width="1440" height="940" rx="0" fill="#151C26"/>
+<rect x="0" y="0" width="1440" height="46" rx="0" fill="#202B3B"/>
+<circle cx="23" cy="23" r="6" fill="#D18F88"/>
+<circle cx="45" cy="23" r="6" fill="#D9BF8B"/>
+<circle cx="67" cy="23" r="6" fill="#A2B9A5"/>
+<text x="720" y="29" class="" text-anchor="middle">addition.vole</text>
+<text x="1414" y="29" class="muted small" text-anchor="end">Design proposal</text>
+<path d="M0 46L1440 46" stroke="#405169"/>
+<text x="24" y="85" class="" style="font-size:20px">Vole</text>
+<rect x="96" y="59" width="220" height="34" rx="6" fill="#202B3B" stroke="#405169"/>
+<text x="110" y="81" class="">VOLE 8-bit</text>
+<text x="301" y="81" class="" text-anchor="end">⌄</text>
+<text x="333" y="81" class="muted small">SimpSim extended</text>
+<rect x="520" y="59" width="104" height="34" rx="6" fill="#202B3B" stroke="#405169"/>
+<text x="572.0" y="81" class="" text-anchor="middle">Assemble</text>
+<rect x="640" y="59" width="78" height="34" rx="6" fill="#9CC8F4"/>
+<text x="679.0" y="81" text-anchor="middle" style="fill:#151C26;font-weight:600">Run</text>
+<rect x="730" y="59" width="78" height="34" rx="6" fill="#202B3B" stroke="#405169"/>
+<text x="769.0" y="81" class="" text-anchor="middle">Step</text>
+<rect x="820" y="59" width="114" height="34" rx="6" fill="#202B3B" stroke="#405169"/>
+<text x="877.0" y="81" class="" text-anchor="middle">Reverse step</text>
+<rect x="946" y="59" width="78" height="34" rx="6" fill="#202B3B" stroke="#405169"/>
+<text x="985.0" y="81" class="" text-anchor="middle">Reset</text>
+<text x="1414" y="81" class="read" text-anchor="end">Paused before 04</text>
+<path d="M0 108L1440 108" stroke="#405169"/>
+<path d="M480 108L480 490" stroke="#405169"/>
+<path d="M1120 108L1120 906" stroke="#405169"/>
+<text x="24" y="143" class="" style="font-size:16px">Assembly</text>
+<text x="456" y="143" class="muted small" text-anchor="end">addition.vole</text>
+<path d="M0 163L1120 163" stroke="#405169"/>
+<rect x="12" y="240" width="456" height="36" rx="4" fill="#202B3B"/>
+<rect x="12" y="240" width="3" height="36" rx="0" fill="#9CC8F4"/>
+<text x="38" y="202" class="mono muted" text-anchor="end">1</text>
+<text x="66" y="202" class="mono read">load</text>
+<text x="144" y="202" class="mono">R1, 3Ah</text>
+<text x="38" y="238" class="mono muted" text-anchor="end">2</text>
+<text x="66" y="238" class="mono read">load</text>
+<text x="144" y="238" class="mono">R2, 43h</text>
+<text x="38" y="274" class="mono muted" text-anchor="end">3</text>
+<text x="66" y="274" class="mono read">addi</text>
+<text x="144" y="274" class="mono">R3, R1, R2</text>
+<text x="38" y="310" class="mono muted" text-anchor="end">4</text>
+<text x="66" y="310" class="mono read">store</text>
+<text x="144" y="310" class="mono">R3, [0BBh]</text>
+<text x="38" y="346" class="mono muted" text-anchor="end">5</text>
+<text x="66" y="346" class="mono read">halt</text>
+<text x="144" y="346" class="mono"></text>
+<text x="66" y="410" class="mono muted small">; Add 3A and 43, then store at BB.</text>
+<text x="24" y="466" class="muted small">10 bytes assembled</text>
+<text x="456" y="466" class="muted small" text-anchor="end">No diagnostics</text>
+<text x="504" y="143" class="" style="font-size:16px">Instructions</text>
+<text x="1096" y="143" class="muted small" text-anchor="end">Hex bytes</text>
+<text x="512" y="186" class="muted small">Address</text>
+<text x="605" y="186" class="muted small">Bytes</text>
+<text x="720" y="186" class="muted small">Assembly</text>
+<rect x="494" y="254" width="610" height="34" rx="4" fill="#202B3B"/>
+<path d="M502 265L510 271L502 277Z" fill="#9CC8F4"/>
+<text x="526" y="224" class="mono muted">00</text>
+<text x="605" y="224" class="mono">21 3A</text>
+<text x="720" y="224" class="mono">load R1, 3Ah</text>
+<text x="526" y="248" class="mono muted">02</text>
+<text x="605" y="248" class="mono">22 43</text>
+<text x="720" y="248" class="mono">load R2, 43h</text>
+<text x="526" y="272" class="mono read">04</text>
+<text x="605" y="272" class="mono read">53 12</text>
+<text x="720" y="272" class="mono read">addi R3, R1, R2</text>
+<text x="526" y="296" class="mono muted">06</text>
+<text x="605" y="296" class="mono">33 BB</text>
+<text x="720" y="296" class="mono">store R3, [0BBh]</text>
+<text x="526" y="320" class="mono muted">08</text>
+<text x="605" y="320" class="mono">C0 00</text>
+<text x="720" y="320" class="mono">halt</text>
+<text x="504" y="374" class="muted small">Decoded instruction</text>
+<rect x="504" y="391" width="44" height="45" rx="5" fill="#202B3B" stroke="#405169"/>
+<text x="526" y="421" class="mono " style="font-size:22px" text-anchor="middle">5</text>
+<text x="526" y="456" class="small " text-anchor="middle">Add</text>
+<rect x="558" y="391" width="44" height="45" rx="5" fill="#202B3B" stroke="#405169"/>
+<text x="580" y="421" class="mono write" style="font-size:22px" text-anchor="middle">3</text>
+<text x="580" y="456" class="small write" text-anchor="middle">Write</text>
+<rect x="612" y="391" width="44" height="45" rx="5" fill="#202B3B" stroke="#405169"/>
+<text x="634" y="421" class="mono read" style="font-size:22px" text-anchor="middle">1</text>
+<text x="634" y="456" class="small read" text-anchor="middle">Read</text>
+<rect x="666" y="391" width="44" height="45" rx="5" fill="#202B3B" stroke="#405169"/>
+<text x="688" y="421" class="mono read" style="font-size:22px" text-anchor="middle">2</text>
+<text x="688" y="456" class="small read" text-anchor="middle">Read</text>
+<text x="747" y="417" class="mono" style="font-size:17px">R3 = wrap8(R1 + R2)</text>
+<text x="747" y="451" class="mono write" style="font-size:14px">Preview: 3A + 43 = 7D</text>
+<text x="1144" y="143" class="" style="font-size:16px">Registers</text>
+<text x="1416" y="143" class="muted small" text-anchor="end">Hex</text>
+<text x="1144" y="180" class="mono muted">PC</text>
+<text x="1190" y="180" class="mono read">04</text>
+<text x="1244" y="180" class="muted small">8-bit values</text>
+<text x="1144" y="220" class="mono muted">R0</text>
+<text x="1242" y="220" class="mono " text-anchor="end">00</text>
+<text x="1282" y="220" class="mono muted">R8</text>
+<text x="1380" y="220" class="mono " text-anchor="end">00</text>
+<rect x="1140" y="229" width="124" height="26" rx="4" fill="#202B3B"/>
+<text x="1144" y="248" class="mono muted">R1</text>
+<text x="1242" y="248" class="mono read" text-anchor="end">3A</text>
+<text x="1282" y="248" class="mono muted">R9</text>
+<text x="1380" y="248" class="mono " text-anchor="end">00</text>
+<rect x="1140" y="257" width="124" height="26" rx="4" fill="#202B3B"/>
+<text x="1144" y="276" class="mono muted">R2</text>
+<text x="1242" y="276" class="mono read" text-anchor="end">43</text>
+<text x="1282" y="276" class="mono muted">RA</text>
+<text x="1380" y="276" class="mono " text-anchor="end">00</text>
+<rect x="1140" y="285" width="124" height="26" rx="4" fill="#202B3B"/>
+<text x="1144" y="304" class="mono muted">R3</text>
+<text x="1242" y="304" class="mono write" text-anchor="end">00</text>
+<text x="1282" y="304" class="mono muted">RB</text>
+<text x="1380" y="304" class="mono " text-anchor="end">00</text>
+<text x="1144" y="332" class="mono muted">R4</text>
+<text x="1242" y="332" class="mono " text-anchor="end">00</text>
+<text x="1282" y="332" class="mono muted">RC</text>
+<text x="1380" y="332" class="mono " text-anchor="end">00</text>
+<text x="1144" y="360" class="mono muted">R5</text>
+<text x="1242" y="360" class="mono " text-anchor="end">00</text>
+<text x="1282" y="360" class="mono muted">RD</text>
+<text x="1380" y="360" class="mono " text-anchor="end">00</text>
+<text x="1144" y="388" class="mono muted">R6</text>
+<text x="1242" y="388" class="mono " text-anchor="end">00</text>
+<text x="1282" y="388" class="mono muted">RE</text>
+<text x="1380" y="388" class="mono " text-anchor="end">00</text>
+<text x="1144" y="416" class="mono muted">R7</text>
+<text x="1242" y="416" class="mono " text-anchor="end">00</text>
+<text x="1282" y="416" class="mono muted">RF</text>
+<text x="1380" y="416" class="mono " text-anchor="end">00</text>
+<path d="M1120 442L1440 442" stroke="#405169"/>
+<text x="1144" y="477" class="" style="font-size:16px">What happens next</text>
+<text x="1144" y="509" class="read">Read R1 and R2.</text>
+<text x="1144" y="537" class="">Add their values in eight bits.</text>
+<text x="1144" y="565" class="write">Write 7D into R3.</text>
+<text x="1144" y="601" class="muted small">PC will advance to 06.</text>
+<path d="M1120 628L1440 628" stroke="#405169"/>
+<text x="1144" y="666" class="" style="font-size:16px">Trace</text>
+<text x="1416" y="666" class="muted small" text-anchor="end">2 steps</text>
+<text x="1144" y="704" class="mono muted small">00</text>
+<text x="1185" y="704" class="mono">load R1, 3Ah</text>
+<text x="1185" y="730" class="mono write small">R1   00 → 3A</text>
+<text x="1144" y="770" class="mono muted small">02</text>
+<text x="1185" y="770" class="mono">load R2, 43h</text>
+<text x="1185" y="796" class="mono write small">R2   00 → 43</text>
+<text x="1144" y="868" class="muted small">Output</text>
+<text x="1230" y="868" class="muted small">No output yet</text>
+<path d="M0 490L1120 490" stroke="#405169"/>
+<text x="24" y="524" class="" style="font-size:16px">Main memory</text>
+<text x="190" y="524" class="muted small">256 bytes</text>
+<text x="820" y="524" class="muted small">Go to address</text>
+<rect x="925" y="502" width="66" height="31" rx="5" fill="#202B3B" stroke="#405169"/>
+<text x="946" y="523" class="mono">00</text>
+<text x="1096" y="524" class="read small" text-anchor="end">Hex</text>
+<text x="135" y="558" class="mono muted small" text-anchor="middle">0</text>
+<text x="187" y="558" class="mono muted small" text-anchor="middle">1</text>
+<text x="239" y="558" class="mono muted small" text-anchor="middle">2</text>
+<text x="291" y="558" class="mono muted small" text-anchor="middle">3</text>
+<text x="343" y="558" class="mono muted small" text-anchor="middle">4</text>
+<text x="395" y="558" class="mono muted small" text-anchor="middle">5</text>
+<text x="447" y="558" class="mono muted small" text-anchor="middle">6</text>
+<text x="499" y="558" class="mono muted small" text-anchor="middle">7</text>
+<text x="551" y="558" class="mono muted small" text-anchor="middle">8</text>
+<text x="603" y="558" class="mono muted small" text-anchor="middle">9</text>
+<text x="655" y="558" class="mono muted small" text-anchor="middle">A</text>
+<text x="707" y="558" class="mono muted small" text-anchor="middle">B</text>
+<text x="759" y="558" class="mono muted small" text-anchor="middle">C</text>
+<text x="811" y="558" class="mono muted small" text-anchor="middle">D</text>
+<text x="863" y="558" class="mono muted small" text-anchor="middle">E</text>
+<text x="915" y="558" class="mono muted small" text-anchor="middle">F</text>
+<text x="1012" y="558" class="muted small">ASCII</text>
+<text x="66" y="585" class="mono muted small" text-anchor="end">00</text>
+<text x="135" y="585" class="mono small" text-anchor="middle">21</text>
+<text x="187" y="585" class="mono small" text-anchor="middle">3A</text>
+<text x="239" y="585" class="mono small" text-anchor="middle">22</text>
+<text x="291" y="585" class="mono small" text-anchor="middle">43</text>
+<rect x="324" y="571" width="38" height="18" rx="3" fill="#202B3B" stroke="#9CC8F4"/>
+<text x="343" y="585" class="mono small read" text-anchor="middle">53</text>
+<rect x="376" y="571" width="38" height="18" rx="3" fill="#202B3B" stroke="#9CC8F4"/>
+<text x="395" y="585" class="mono small read" text-anchor="middle">12</text>
+<text x="447" y="585" class="mono small" text-anchor="middle">33</text>
+<text x="499" y="585" class="mono small" text-anchor="middle">BB</text>
+<text x="551" y="585" class="mono small" text-anchor="middle">C0</text>
+<text x="603" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="585" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="585" class="mono muted" style="font-size:10px">!:&quot;CS.3.........</text>
+<text x="66" y="604" class="mono muted small" text-anchor="end">10</text>
+<text x="135" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="604" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="604" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="623" class="mono muted small" text-anchor="end">20</text>
+<text x="135" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="623" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="623" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="642" class="mono muted small" text-anchor="end">30</text>
+<text x="135" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="642" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="642" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="661" class="mono muted small" text-anchor="end">40</text>
+<text x="135" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="661" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="661" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="680" class="mono muted small" text-anchor="end">50</text>
+<text x="135" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="680" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="680" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="699" class="mono muted small" text-anchor="end">60</text>
+<text x="135" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="699" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="699" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="718" class="mono muted small" text-anchor="end">70</text>
+<text x="135" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="718" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="718" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="737" class="mono muted small" text-anchor="end">80</text>
+<text x="135" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="737" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="737" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="756" class="mono muted small" text-anchor="end">90</text>
+<text x="135" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="756" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="756" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="775" class="mono muted small" text-anchor="end">A0</text>
+<text x="135" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="775" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="775" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="794" class="mono muted small" text-anchor="end">B0</text>
+<text x="135" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="794" class="mono small muted" text-anchor="middle">00</text>
+<rect x="688" y="780" width="38" height="18" rx="3" fill="none" stroke="#E4B48B" stroke-dasharray="3 2"/>
+<text x="707" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="794" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="794" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="813" class="mono muted small" text-anchor="end">C0</text>
+<text x="135" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="813" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="813" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="832" class="mono muted small" text-anchor="end">D0</text>
+<text x="135" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="832" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="832" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="851" class="mono muted small" text-anchor="end">E0</text>
+<text x="135" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="851" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="851" class="mono muted" style="font-size:10px">................</text>
+<text x="66" y="870" class="mono muted small" text-anchor="end">F0</text>
+<text x="135" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="187" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="239" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="291" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="343" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="395" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="447" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="499" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="551" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="603" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="655" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="707" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="759" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="811" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="863" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="915" y="870" class="mono small muted" text-anchor="middle">00</text>
+<text x="975" y="870" class="mono muted" style="font-size:10px">................</text>
+<text x="24" y="891" class="read small">Outlined bytes: current instruction</text>
+<text x="1096" y="891" class="write small" text-anchor="end">Dashed cell BB: later store destination</text>
+<path d="M0 906L1440 906" stroke="#405169"/>
+<rect x="0" y="907" width="1440" height="33" rx="0" fill="#202B3B"/>
+<text x="24" y="928" class="read small">Paused</text>
+<text x="120" y="928" class="small muted">2 instructions executed</text>
+<text x="430" y="928" class="mono small muted">Selected instruction 04</text>
+<text x="1416" y="928" class="small muted" text-anchor="end">Functional simulation</text>
+</svg>

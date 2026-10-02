@@ -1,0 +1,3 @@
+# Preserve copied license notices verbatim, including their upstream whitespace.
+crates/vole-app/assets/fonts/OFL-*.txt -text whitespace=cr-at-eol,-blank-at-eol
+packaging/licenses/*.txt -text whitespace=-blank-at-eol

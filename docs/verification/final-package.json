@@ -1,0 +1,18 @@
+{
+  "time_utc": "2026-10-02T21:57:44.138151+00:00",
+  "app_sha256": "b99f8ae983a19c863c861aa1b9989e6b51d8265a9fd2208a2b9ed105c2517dc9",
+  "cli_sha256": "ad48ad512a4f9ad9c557080daaf25895537b776e0d363428d382ca9236953e8a",
+  "archive_sha256": "db1cff0dfebc0592cc034999a22b0c3e86bc2e8c7f358a2d393b5b9a9db38b9c",
+  "archive_bytes": 173725175,
+  "notice_inventory_entries": 854,
+  "original_crate_archives": 152,
+  "five_guest_smoke": "pass",
+  "five_raw_round_trips": "pass",
+  "notice_paths_and_archive_checksums": "pass",
+  "gui_refresh": "Quit handler fix; native proof supplied by GPUI agent and parent",
+  "native_evidence": [
+    "screenshots/quit-prompt.png",
+    "screenshots/quit-cancel.png"
+  ],
+  "archive": "dist/vole-0.1.0-linux-x64.tar.gz"
+}

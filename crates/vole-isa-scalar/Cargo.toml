@@ -1,0 +1,14 @@
+[package]
+name = "vole-isa-scalar"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+vole-core.workspace = true
+capstone = { version = "=0.14.0", default-features = false, features = ["std", "full", "arch_arm", "arch_arm64", "arch_x86"] }
+object = { version = "=0.37.3", default-features = false, features = ["read", "std", "elf"] }
+tempfile = "3.23"
+
+[lints]
+workspace = true

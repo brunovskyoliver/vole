@@ -1,0 +1,15 @@
+{
+  "platform": "linux-x11",
+  "architectures": [
+    "arm32",
+    "x86"
+  ],
+  "binary_sha256": {
+    "arm32": "902864d8c48052154baec43098c345364277b7936ad1ce777df9f295ceaf0717",
+    "x86": "7d77bfd6ce8be2b09655f79bf5fcab96c070b0922ecc902d1de98cdccf1d13e3"
+  },
+  "notes": "ARM32 capture preceded the final description/title-cache change; executable behavior and layout unchanged. x86 uses final binary. Both screenshots visibly show PC after two loads and registers58/67. Wide and720x520 compact frames reviewed. Final x86 dirty-title update observed through WM_NAME.",
+  "observed_native_actions": [
+    "x86 source edit updates native edited-window title"
+  ]
+}

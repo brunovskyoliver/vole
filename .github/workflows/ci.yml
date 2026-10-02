@@ -1,0 +1,93 @@
+name: Native build and guest regression
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Install pinned Rust
+        shell: bash
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
+      - name: Linux prerequisites
+        if: runner.os == 'Linux'
+        run: ./scripts/setup-linux.sh
+      - name: Configure Windows C++ compiler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$installation) { throw 'Visual Studio C++ tools were not found' }
+          $batch = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
+          cmd /c "`"$batch`" >nul && set" | ForEach-Object {
+            if ($_ -match '^(Path|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|WindowsSdkDir|WindowsSDKVersion|UCRTVersion|UniversalCRTSdkDir|VSINSTALLDIR)=(.*)$') {
+              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            }
+          }
+      - uses: actions/cache@v6.1.0
+        with:
+          path: target/toolchain
+          key: llvm-18.1.8-3b5b5c1-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-toolchain.py') }}
+      - name: Build pinned assembler and linker
+        run: python scripts/build-toolchain.py --jobs 2 --clean-build
+      - name: Select the pinned toolchain for tests
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          suffix = ".exe" if os.name == "nt" else ""
+          root = Path("target/toolchain/bin").resolve()
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write(f"VOLE_LLVM_MC={root / ('llvm-mc' + suffix)}\n")
+              output.write(f"VOLE_LLD={root / ('ld.lld' + suffix)}\n")
+      - uses: actions/cache@v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Public interface and guest tests
+        run: cargo test --workspace --locked
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build native application and CLI
+        run: cargo build --locked -p vole-app -p vole-cli
+      - name: Verify source assembly and raw-machine round trips for every guest
+        run: python scripts/verify-engines.py --output dist/engine-verification.json
+      - uses: actions/upload-artifact@v7.0.1
+        if: always()
+        with:
+          name: native-guest-evidence-${{ runner.os }}-${{ runner.arch }}
+          path: dist/engine-verification.json
+          if-no-files-found: warn
+      - name: Capture actual Linux GPUI window
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s '-screen 0 1800x1200x24 -noreset' python scripts/verify-native.py --start-window-manager --start-compositor
+      - uses: actions/upload-artifact@v7.0.1
+        if: always() && runner.os == 'Linux'
+        with:
+          name: linux-native-window-evidence
+          path: dist/native-evidence
+          if-no-files-found: warn

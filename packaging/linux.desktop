@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Vole
+Comment=Assemble and simulate teaching machines
+Exec=vole
+Terminal=false
+Categories=Development;Education;
+StartupWMClass=dev.vole.Workbench

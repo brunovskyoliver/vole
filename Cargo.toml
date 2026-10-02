@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["vendor/gpui-pre-linux"]
+default-members = ["crates/vole-app", "crates/vole-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+gpui = { package = "gpui-pre", version = "=0.3.7" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.7", features = ["font-kit", "wayland", "x11"] }
+gpui-kit = "=0.7.0"
+vole-core = { path = "crates/vole-core" }
+vole-isa-vole = { path = "crates/vole-isa-vole" }
+vole-isa-scalar = { path = "crates/vole-isa-scalar" }
+vole-runtime = { path = "crates/vole-runtime" }
+vole-project = { path = "crates/vole-project" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# GPUI's X11 backend must use an opaque visual for this app's normal window.
+# See vendor/gpui-pre-linux/VOLE-PATCH.md for the native rendering regression.
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
+
+[profile.dev]
+debug = 0
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

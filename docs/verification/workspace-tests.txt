@@ -1,0 +1,176 @@
+    Finished `test` profile [unoptimized] target(s) in 1.02s
+     Running unittests src/main.rs (target/debug/deps/vole-b6813b47f8ddd33f)
+
+running 2 tests
+test inspect::tests::vole_float_layout ... ok
+test inspect::tests::hex_and_signed_preserve_full_width ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/vole_cli-380f2fdf88d78fca)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vole_core-0688866b8fdfa1e6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/register_aliases.rs (target/debug/deps/register_aliases-1e541ed653b056e5)
+
+running 5 tests
+test arm64_word_aliases_read_low_bits_and_zero_registers_are_constant ... ok
+test vole_register_names_are_case_insensitive_hex_names ... ok
+test arm32_conventional_names_and_pc_alias_resolve_stored_values ... ok
+test x64_low_and_high_aliases_preserve_the_original_snapshot ... ok
+test x86_has_legacy_aliases_without_x64_only_byte_or_quad_registers ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/vole_isa_scalar-37a679958a32700f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scalar.rs (target/debug/deps/scalar-71aae3a41855b28d)
+
+running 24 tests
+test arm32_literal_load_relocations_and_register_indexed_memory ... ok
+test arm32_conditional_execution_pc_pipeline_stack_and_flags ... ok
+test arm32_thumb_mode_and_invalid_instruction_branches_are_explicit_faults ... ok
+test arm64_width_aliases_flags_conditions_and_stack_call ... ok
+test arm64_extended_index_and_flag_setting_pc_writes_are_handled_explicitly ... ok
+test decode_reports_the_actual_instruction_size_and_truncated_bytes ... ok
+test arm64_word_and_signed_byte_loads_post_index_and_address_symbols ... ok
+test diagnostics_map_to_original_lines_and_external_files_are_rejected ... ok
+test actual_bytes_execute_after_source_and_predecoded_instructions_are_removed ... ok
+test faults_are_atomic_for_a_partially_completed_pair_store ... ok
+test arithmetic_signed_overflow_and_arm32_immediate_rotate_carry ... ok
+test faults_are_atomic_for_x86_pop_to_invalid_memory_and_unknown_instruction ... ok
+test every_architecture_assembles_real_bytes_stores_125_and_reverses ... ok
+test inline_directives_cannot_read_host_files_or_allocate_unbounded_images ... ok
+test deterministic_output_and_syscall_exit_are_reversible ... ok
+test flags_follow_architectural_overflow_and_unsigned_borrow_rules ... ok
+test load_rejects_overlaps_and_overflow_without_destroying_loaded_state ... ok
+test repeated_string_instructions_fault_promptly_and_state_is_unchanged ... ok
+test history_and_imported_step_counters_remain_bounded ... ok
+test x64_rip_relative_load_and_high_byte_preservation ... ok
+test shifts_and_bitwise_operations_update_results_and_carry ... ok
+test saved_state_restores_all_guest_state_and_rejects_invalid_snapshots_atomically ... ok
+test x86_aliases_signed_condition_stack_and_variable_lengths ... ok
+test shipped_samples_run_using_the_public_assembler_and_machine ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.64s
+
+     Running unittests src/lib.rs (target/debug/deps/vole_isa_vole-9155f707ca9f2e2d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/acceptance.rs (target/debug/deps/acceptance-e78202511c9ad2dd)
+
+running 15 tests
+test assemble_original_addition_program ... ok
+test arithmetic_wrap_rotation_and_move_operand_order ... ok
+test all_data_operations_match_the_instruction_table ... ok
+test bounds_overlap_undefined_labels_and_strings_report_source_lines ... ok
+test debugger_edits_clear_history_but_invalid_edits_preserve_it ... ok
+test fetch_and_pc_wrap_and_odd_targets_are_byte_addressed ... ok
+test invalid_load_does_not_replace_a_running_program ... ok
+test output_undo_and_reset_restore_every_observable_state ... ok
+test labels_strings_and_literals_assemble_without_treating_string_colons_as_labels ... ok
+test reserved_bits_and_unknown_opcode_fault_atomically ... ok
+test bundled_original_examples_run_to_their_expected_results ... ok
+test run_addition_and_reverse_memory_write ... ok
+test signed_less_equal_and_equal_branches_take_only_their_conditions ... ok
+test teaching_float_exact_results_and_round_towards_zero ... ok
+test reverse_history_stops_at_retention_boundary ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running unittests src/lib.rs (target/debug/deps/vole_project-5b107676fcb5e884)
+
+running 6 tests
+test tests::newer_project_versions_and_wrong_profiles_are_rejected ... ok
+test tests::executable_from_previous_source_is_rejected_before_saving ... ok
+test tests::invalid_layout_and_breakpoint_addresses_are_rejected ... ok
+test tests::previous_layout_documents_receive_the_default_vertical_split ... ok
+test tests::projects_round_trip_architecture_source_and_breakpoints ... ok
+test tests::failed_save_preserves_the_existing_document ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/vole_runtime-d91b86415b40b1b5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/debugger.rs (target/debug/deps/debugger-d3570dff9efdb45e)
+
+running 11 tests
+test breakpoint_at_entry_stops_on_first_run_and_resumes_once ... ok
+test imported_machine_bytes_execute_without_source_assembly ... ok
+test breakpoint_stops_before_execution_and_resume_passes_it_once ... ok
+test invalid_edit_commands_explain_the_failure_in_the_published_view ... ok
+test machine_edits_require_pause_and_clear_history ... ok
+test invalid_saved_state_cannot_inject_out_of_width_values ... ok
+test source_edits_and_failed_assembly_cannot_run_stale_bytes ... ok
+test persisted_machine_state_resumes_without_reassembling_or_old_undo ... ok
+test read_watchpoint_uses_data_reads_and_ignores_instruction_fetch ... ok
+test user_can_assemble_step_reverse_run_and_reset ... ok
+test write_watchpoint_stops_after_the_store_and_reset_keeps_breakpoints ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/review_cases.rs (target/debug/deps/review_cases-4160bcad10512dc1)
+
+running 11 tests
+test guest_self_modification_and_reversal_update_live_disassembly ... ok
+test manually_stepping_a_loop_breakpoint_consumes_the_old_resume_marker ... ok
+test raw_export_rejects_an_entry_that_the_fixed_origin_import_cannot_represent ... ok
+test assembly_publication_advances_revision_and_marks_the_previous_image_stale ... ok
+test reset_restores_source_associations_after_an_executable_memory_edit ... ok
+test reversing_a_loop_breakpoint_does_not_keep_a_stale_resume_marker ... ok
+test editing_a_scalar_flag_changes_the_branch_and_clears_undo ... ok
+test watchpoint_ranges_are_validated_before_the_debugger_changes ... ok
+test raw_export_rejects_mappings_outside_the_importable_span ... ok
+test runtime_worker_can_pause_a_long_loop_without_consuming_its_run_budget ... ok
+test a_successfully_assembled_image_with_invalid_entry_cannot_run_stale_bytes ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+   Doc-tests vole_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vole_isa_scalar
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vole_isa_vole
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vole_project
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests vole_runtime
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

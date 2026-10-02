@@ -1,0 +1,36 @@
+{
+  "host": "Linux",
+  "binary": "/home/brunovsky/.t3/projects/vole/dist/vole-0.1.0-linux-x64/vole-cli",
+  "targets": {
+    "vole": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    },
+    "arm32": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 6,
+      "stored_value": 125
+    },
+    "arm64": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 6,
+      "stored_value": 125
+    },
+    "x86": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    },
+    "x64": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    }
+  }
+}
