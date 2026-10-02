@@ -467,5 +467,7 @@ pub fn assemble(architecture: Architecture, source: &str) -> Result<Program, Vec
         instructions,
         symbols,
         initial_registers: BTreeMap::from([(stack.to_string(), 0x20000)]),
+        language: Default::default(),
+        debug: None,
     })
 }

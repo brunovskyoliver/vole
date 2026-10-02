@@ -559,6 +559,8 @@ pub fn assemble(source: &str) -> Result<Program, Vec<Diagnostic>> {
         instructions,
         symbols,
         initial_registers: BTreeMap::new(),
+        language: Default::default(),
+        debug: None,
     })
 }
 

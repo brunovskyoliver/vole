@@ -20,6 +20,8 @@ vole-isa-vole = { path = "crates/vole-isa-vole" }
 vole-isa-scalar = { path = "crates/vole-isa-scalar" }
 vole-runtime = { path = "crates/vole-runtime" }
 vole-project = { path = "crates/vole-project" }
+vole-c = { path = "crates/vole-c" }
+vole-debug = { path = "crates/vole-debug" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

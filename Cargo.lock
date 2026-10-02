@@ -7330,6 +7330,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vole-c"
+version = "0.1.0"
+dependencies = [
+ "vole-core",
+ "vole-isa-scalar",
+]
+
+[[package]]
 name = "vole-cli"
 version = "0.1.0"
 dependencies = [
@@ -7344,6 +7352,13 @@ name = "vole-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "vole-debug"
+version = "0.1.0"
+dependencies = [
+ "vole-core",
 ]
 
 [[package]]
@@ -7378,7 +7393,9 @@ name = "vole-runtime"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "vole-c",
  "vole-core",
+ "vole-debug",
  "vole-isa-scalar",
  "vole-isa-vole",
 ]

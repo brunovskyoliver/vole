@@ -1,12 +1,15 @@
 //! Serialized, bounded execution and immutable desktop observations.
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, RwLock, mpsc},
     thread,
     time::{Duration, Instant},
 };
-use vole_core::{Architecture, Diagnostic, Instruction, Machine, Program, SimError, Snapshot};
+use vole_core::{
+    Architecture, CompilerSettings, Diagnostic, Instruction, Machine, Program, SimError, Snapshot,
+    SourceLanguage, debug::DebugView,
+};
 
 pub const RUN_INSTRUCTION_BUDGET: u64 = 1_000_000;
 pub const RUN_BATCH: usize = 128;
@@ -36,6 +39,27 @@ impl RunState {
     }
 }
 
+/// Source-level stepping requests. Instruction stepping uses [`Command::Step`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceStep {
+    /// Stop at the next C statement, entering called user functions.
+    Into,
+    /// Stop at the next C statement in this frame or a caller.
+    Over,
+    /// Run until the current function returns to its caller.
+    Out,
+}
+
+/// A user source-line breakpoint and the address it resolved to, if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceBreakpoint {
+    /// 1-based line requested by the user.
+    pub line: usize,
+    /// Line whose code is used, after snapping forward to the next line with code.
+    pub resolved_line: Option<usize>,
+    pub address: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watchpoint {
     pub address: u64,
@@ -59,6 +83,14 @@ pub struct SessionView {
     pub watchpoints: Vec<Watchpoint>,
     pub selected_address: Option<u64>,
     pub dirty: bool,
+    pub language: SourceLanguage,
+    pub settings: CompilerSettings,
+    /// User source-line breakpoints keyed by requested line.
+    pub source_breakpoints: BTreeMap<usize, SourceBreakpoint>,
+    /// Paused source-level debugger observations for compiled C images.
+    pub debug: Option<DebugView>,
+    /// Active source-level step while the machine is running.
+    pub stepping: Option<SourceStep>,
 }
 
 impl SessionView {
@@ -78,6 +110,11 @@ impl SessionView {
             watchpoints: Vec::new(),
             selected_address: None,
             dirty: true,
+            language: SourceLanguage::Assembly,
+            settings: CompilerSettings::default(),
+            source_breakpoints: BTreeMap::new(),
+            debug: None,
+            stepping: None,
         }
     }
 }
@@ -88,6 +125,13 @@ pub enum Command {
         architecture: Architecture,
         source: String,
     },
+    /// Assemble or compile `source` in the given language. Compilation runs on the worker.
+    Build {
+        architecture: Architecture,
+        language: SourceLanguage,
+        source: String,
+        settings: CompilerSettings,
+    },
     MarkStale(String),
     LoadProgram(Program),
     Restore {
@@ -95,12 +139,17 @@ pub enum Command {
         snapshot: Option<Snapshot>,
     },
     Step,
+    /// Source-level step for compiled C images; bounded and pausable like Run.
+    SourceStep(SourceStep),
     Reverse,
     Reset,
     Run,
     Pause,
     ToggleBreakpoint(u64),
     SetBreakpoints(BTreeSet<u64>),
+    /// Toggle a breakpoint on a 1-based user source line.
+    ToggleSourceBreakpoint(usize),
+    SetSourceBreakpoints(BTreeSet<usize>),
     SelectAddress(u64),
     EditMemory {
         address: u64,
@@ -157,16 +206,35 @@ impl Session {
     }
 
     pub fn assemble(&mut self, architecture: Architecture, source: String) -> Result<(), SimError> {
-        if self.view.architecture != architecture {
+        self.build(
+            architecture,
+            SourceLanguage::Assembly,
+            source,
+            CompilerSettings::default(),
+        )
+    }
+
+    /// Assemble or compile a document and load the resulting image.
+    pub fn build(
+        &mut self,
+        architecture: Architecture,
+        language: SourceLanguage,
+        source: String,
+        settings: CompilerSettings,
+    ) -> Result<(), SimError> {
+        if self.view.architecture != architecture || self.view.language != language {
             self.view.breakpoints.clear();
             self.view.watchpoints.clear();
             self.view.program = None;
             self.view.snapshot = None;
             self.view.current_instruction = None;
             self.view.disassembly.clear();
+            self.view.debug = None;
             self.machine = None;
         }
         self.view.architecture = architecture;
+        self.view.language = language;
+        self.view.settings = settings.clone();
         self.view.source = source.clone();
         self.view.state = RunState::Assembling;
         self.view.dirty = true;
@@ -174,9 +242,14 @@ impl Session {
         let assembled = if source.len() > 1024 * 1024 {
             Err(vec![Diagnostic::new(1, "Source exceeds the 1 MiB limit.")])
         } else {
-            match architecture {
-                Architecture::Vole => vole_isa_vole::assemble(&source),
-                _ => vole_isa_scalar::assemble(architecture, &source),
+            match (language, architecture) {
+                (SourceLanguage::C, Architecture::Vole) => Err(vec![Diagnostic::new(
+                    1,
+                    "C compilation targets ARM32, ARM64, x86 and x64. VOLE programs use VOLE assembly.",
+                )]),
+                (SourceLanguage::C, _) => vole_c::compile(architecture, &source, &settings),
+                (SourceLanguage::Assembly, Architecture::Vole) => vole_isa_vole::assemble(&source),
+                (SourceLanguage::Assembly, _) => vole_isa_scalar::assemble(architecture, &source),
             }
         };
         let result = assembled.and_then(|program| {
@@ -216,6 +289,7 @@ impl Session {
         }
         self.view.architecture = program.architecture;
         self.view.source = program.source.clone();
+        self.view.language = program.language;
         self.view.program = Some(program);
         self.view.state = RunState::Ready;
         self.view.message = "Ready to execute.".into();
@@ -236,6 +310,44 @@ impl Session {
                 architecture,
                 source,
             } => self.assemble(architecture, source),
+            Command::Build {
+                architecture,
+                language,
+                source,
+                settings,
+            } => self.build(architecture, language, source, settings),
+            Command::SourceStep(_) => Err(SimError(
+                "Source stepping is not available for this program yet.".into(),
+            )),
+            Command::ToggleSourceBreakpoint(line) => {
+                if self.view.source_breakpoints.remove(&line).is_none() {
+                    self.view.source_breakpoints.insert(
+                        line,
+                        SourceBreakpoint {
+                            line,
+                            resolved_line: None,
+                            address: None,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            Command::SetSourceBreakpoints(lines) => {
+                self.view.source_breakpoints = lines
+                    .into_iter()
+                    .map(|line| {
+                        (
+                            line,
+                            SourceBreakpoint {
+                                line,
+                                resolved_line: None,
+                                address: None,
+                            },
+                        )
+                    })
+                    .collect();
+                Ok(())
+            }
             Command::LoadProgram(program) => self.load(program),
             Command::Restore { program, snapshot } => {
                 let mut staged = Session::new(program.architecture, program.source.clone());
@@ -773,6 +885,8 @@ pub fn import_bytes(architecture: Architecture, bytes: &[u8]) -> Result<Program,
         instructions,
         symbols: Default::default(),
         initial_registers,
+        language: Default::default(),
+        debug: None,
     })
 }
 
@@ -853,7 +967,8 @@ impl Runtime {
                     match receiver.recv_timeout(wait) {
                         Ok(Command::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
                         Ok(command) => {
-                            if matches!(&command, Command::Assemble { .. }) {
+                            if matches!(&command, Command::Assemble { .. } | Command::Build { .. })
+                            {
                                 session.mark_assembling();
                                 publish(&worker_view, &session);
                             }

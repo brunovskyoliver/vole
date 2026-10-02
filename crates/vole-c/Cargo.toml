@@ -1,16 +1,12 @@
 [package]
-name = "vole-runtime"
+name = "vole-c"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
 [dependencies]
 vole-core.workspace = true
-vole-isa-vole.workspace = true
 vole-isa-scalar.workspace = true
-vole-c.workspace = true
-vole-debug.workspace = true
-serde.workspace = true
 
 [lints]
 workspace = true

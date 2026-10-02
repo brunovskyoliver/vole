@@ -6,9 +6,12 @@ use std::{
     io::{Read, Write},
     path::Path,
 };
-use vole_core::{Architecture, Program, SimError, Snapshot};
+use vole_core::{Architecture, CompilerSettings, Program, SimError, Snapshot, SourceLanguage};
 
+/// Assembly projects keep version 1 so earlier releases can still open them.
 pub const PROJECT_VERSION: u32 = 1;
+/// C projects add language, compiler settings and source-line breakpoints.
+pub const C_PROJECT_VERSION: u32 = 2;
 pub const MAX_PROJECT_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,6 +29,21 @@ pub struct Project {
     pub image: Option<Program>,
     #[serde(default)]
     pub snapshot: Option<Snapshot>,
+    #[serde(default, skip_serializing_if = "is_assembly")]
+    pub language: SourceLanguage,
+    #[serde(default, skip_serializing_if = "is_default_settings")]
+    pub compiler: CompilerSettings,
+    /// 1-based user source lines. Addresses are re-resolved after each build.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub source_breakpoints: BTreeSet<usize>,
+}
+
+fn is_assembly(language: &SourceLanguage) -> bool {
+    *language == SourceLanguage::Assembly
+}
+
+fn is_default_settings(settings: &CompilerSettings) -> bool {
+    *settings == CompilerSettings::default()
 }
 
 fn default_profile() -> String {
@@ -67,15 +85,61 @@ impl Project {
             layout: Layout::default(),
             image: None,
             snapshot: None,
+            language: SourceLanguage::Assembly,
+            compiler: CompilerSettings::default(),
+            source_breakpoints: BTreeSet::new(),
         }
     }
 
+    /// A C document for a real-ISA target, saved as a version 2 project.
+    pub fn new_c(
+        architecture: Architecture,
+        source: impl Into<String>,
+        compiler: CompilerSettings,
+    ) -> Self {
+        let mut project = Self::new(architecture, source);
+        project.version = C_PROJECT_VERSION;
+        project.language = SourceLanguage::C;
+        project.compiler = compiler;
+        project
+    }
+
     pub fn validate(&self) -> Result<(), SimError> {
-        if self.version != PROJECT_VERSION {
+        if self.version != PROJECT_VERSION && self.version != C_PROJECT_VERSION {
             return Err(SimError(format!(
-                "Project version {} is unsupported; this app reads version {PROJECT_VERSION}.",
+                "Project version {} is unsupported; this app reads versions {PROJECT_VERSION} and {C_PROJECT_VERSION}.",
                 self.version
             )));
+        }
+        if self.version == PROJECT_VERSION
+            && (self.language != SourceLanguage::Assembly
+                || !self.source_breakpoints.is_empty()
+                || !is_default_settings(&self.compiler))
+        {
+            return Err(SimError(
+                "Version 1 projects contain assembly only; C documents use version 2.".into(),
+            ));
+        }
+        if self.language == SourceLanguage::C && self.architecture == Architecture::Vole {
+            return Err(SimError(
+                "C projects target ARM32, ARM64, x86 or x64.".into(),
+            ));
+        }
+        if self
+            .source_breakpoints
+            .iter()
+            .any(|line| *line == 0 || *line > 1_000_000)
+        {
+            return Err(SimError("Source breakpoint lines are invalid.".into()));
+        }
+        if self
+            .image
+            .as_ref()
+            .is_some_and(|image| image.language != self.language)
+        {
+            return Err(SimError(
+                "Saved executable was built from a different source language.".into(),
+            ));
         }
         if self.source.len() > 1024 * 1024 {
             return Err(SimError("Assembly source exceeds the 1 MiB limit.".into()));
@@ -219,8 +283,8 @@ mod tests {
     #[test]
     fn newer_project_versions_and_wrong_profiles_are_rejected() {
         let mut project = Project::new(Architecture::Vole, "halt");
-        project.version = 2;
-        assert!(project.to_json().unwrap_err().0.contains("version 2"));
+        project.version = 3;
+        assert!(project.to_json().unwrap_err().0.contains("version 3"));
         project.version = 1;
         project.profile = "ieee-float8".into();
         assert!(project.to_json().unwrap_err().0.contains("unsupported"));
@@ -260,6 +324,8 @@ mod tests {
             instructions: vec![],
             symbols: Default::default(),
             initial_registers: Default::default(),
+            language: Default::default(),
+            debug: None,
         });
         assert!(
             project

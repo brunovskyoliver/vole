@@ -2,6 +2,9 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 
+pub mod debug;
+pub use debug::{CompilerSettings, DebugInfo, Optimization, SourceLanguage};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Architecture {
@@ -92,11 +95,25 @@ impl Architecture {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Severity {
+    #[default]
+    Error,
+    Warning,
+    Note,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub line: usize,
     pub column: usize,
     pub message: String,
+    #[serde(default)]
+    pub severity: Severity,
+    /// Optional teaching explanation, e.g. why a C feature is outside the scope.
+    #[serde(default)]
+    pub hint: Option<String>,
 }
 
 impl Diagnostic {
@@ -105,7 +122,28 @@ impl Diagnostic {
             line,
             column: 1,
             message: message.into(),
+            severity: Severity::Error,
+            hint: None,
         }
+    }
+
+    pub fn at(line: usize, column: usize, severity: Severity, message: impl Into<String>) -> Self {
+        Self {
+            line,
+            column: column.max(1),
+            message: message.into(),
+            severity,
+            hint: None,
+        }
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
     }
 }
 
@@ -146,6 +184,16 @@ pub struct Program {
     pub instructions: Vec<Instruction>,
     pub symbols: BTreeMap<String, u64>,
     pub initial_registers: BTreeMap<String, u64>,
+    /// Document language. Older projects omit this and are assembly.
+    #[serde(default, skip_serializing_if = "is_assembly")]
+    pub language: SourceLanguage,
+    /// Compiler debug metadata for C images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub debug: Option<DebugInfo>,
+}
+
+fn is_assembly(language: &SourceLanguage) -> bool {
+    *language == SourceLanguage::Assembly
 }
 
 impl Program {
@@ -340,4 +388,24 @@ pub trait Machine: Send {
     fn restore_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), SimError>;
     fn write_register(&mut self, name: &str, value: u64) -> Result<(), SimError>;
     fn write_memory(&mut self, address: u64, bytes: &[u8]) -> Result<(), SimError>;
+
+    /// Current program counter without building a full snapshot.
+    fn pc(&self) -> u64 {
+        self.snapshot().pc
+    }
+    /// Read a register or architectural alias without building a full snapshot.
+    fn read_register(&self, name: &str) -> Option<u64> {
+        self.snapshot().register(name)
+    }
+    /// Read mapped bytes without side effects or watchpoint records.
+    fn read_memory(&self, address: u64, length: usize) -> Option<Vec<u8>> {
+        self.snapshot().read(address, length)
+    }
+    fn halted(&self) -> bool {
+        self.snapshot().halted
+    }
+    /// Steps executed since load; lets callers check history without a snapshot.
+    fn steps(&self) -> u64 {
+        self.snapshot().steps
+    }
 }
