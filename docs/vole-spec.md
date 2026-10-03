@@ -73,7 +73,9 @@ underscores. `;` starts a comment outside a quoted string. Operands use
 commas. `mov` is an alias for `move`. Conditional branches accept either
 `R1=R0` / `R1<=R0` or the shorter `R1` operand.
 
-Numbers may be decimal, suffix-h hexadecimal or `0x` hexadecimal. Byte
+Numbers are decimal or `0x` hexadecimal (`0x3A`), and Vole shows
+hexadecimal values in that form. The older suffix-h form (`3Ah`) is retired
+but still read, so existing programs keep assembling. Byte
 literals accept -128..255 and encode negatives in two's complement. Memory
 addresses and origins accept 0..255; rotation counts accept 0..15. Symbols
 may be used as operands and in `label + number` or `label - number`
@@ -129,9 +131,9 @@ interpretation. Export requires both the first mapped region and entry to be
 than silently moving the program. Save a versioned project for programs
 using `org` with another entry or for a resumable execution snapshot.
 
-ARM32, ARM64, x86 and x64 raw imports start at 1000h. Their first 4096 bytes
+ARM32, ARM64, x86 and x64 raw imports start at 0x1000. Their first 4096 bytes
 are code; subsequent bytes populate main memory and stack at the fixed
-teaching addresses. Their raw image limit is 1F000h bytes. A normal source
+teaching addresses. Their raw image limit is 0x1F000 bytes. A normal source
 export includes the mapped data/stack image, and import initializes the
 target's stack pointer. Exports beyond this importable span are rejected;
 save a project to retain a wider sparse layout. See `isa-support.md` for the

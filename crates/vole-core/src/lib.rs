@@ -78,7 +78,7 @@ impl Architecture {
 
     pub fn example_source(self) -> &'static str {
         match self {
-            Self::Vole => "load R1, 3Ah\nload R2, 43h\naddi R3, R1, R2\nstore R3, [0BBh]\nhalt\n",
+            Self::Vole => "load R1, 0x3A\nload R2, 0x43\naddi R3, R1, R2\nstore R3, [0xBB]\nhalt\n",
             Self::Arm32 => {
                 ".syntax unified\n.text\n.global _start\n_start:\n    mov r1, #58\n    mov r2, #67\n    add r3, r1, r2\n    mov r4, #8192\n    str r3, [r4]\n    bkpt #0\n"
             }

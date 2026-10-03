@@ -18,22 +18,22 @@ pub fn decode(address: u64, bytes: &[u8]) -> Result<Instruction, SimError> {
     let t = bytes[1] & 15;
     let xy = bytes[1];
     let reg = |n| format!("R{n:X}");
-    let mem = |n| format!("memory[{n:02X}h]");
+    let mem = |n| format!("memory[0x{n:02X}]");
     let (assembly, explanation, reads, writes) = match op {
         1 => (
-            format!("load {}, [{xy:02X}h]", reg(r)),
+            format!("load {}, [0x{xy:02X}]", reg(r)),
             format!("{} = {}", reg(r), mem(xy)),
             vec![mem(xy)],
             vec![reg(r)],
         ),
         2 => (
-            format!("load {}, {xy:02X}h", reg(r)),
-            format!("{} = {xy:02X}h", reg(r)),
+            format!("load {}, 0x{xy:02X}", reg(r)),
+            format!("{} = 0x{xy:02X}", reg(r)),
             vec![],
             vec![reg(r)],
         ),
         3 => (
-            format!("store {}, [{xy:02X}h]", reg(r)),
+            format!("store {}, [0x{xy:02X}]", reg(r)),
             format!("{} = {}", mem(xy), reg(r)),
             vec![reg(r)],
             vec![mem(xy)],
@@ -70,11 +70,11 @@ pub fn decode(address: u64, bytes: &[u8]) -> Result<Instruction, SimError> {
         ),
         11 => (
             if r == 0 {
-                format!("jmp {xy:02X}h")
+                format!("jmp 0x{xy:02X}")
             } else {
-                format!("jmpEQ {}=R0, {xy:02X}h", reg(r))
+                format!("jmpEQ {}=R0, 0x{xy:02X}", reg(r))
             },
-            format!("if {} == R0: PC = {xy:02X}h", reg(r)),
+            format!("if {} == R0: PC = 0x{xy:02X}", reg(r)),
             vec![reg(r), "R0".into()],
             vec!["PC".into()],
         ),
@@ -92,14 +92,14 @@ pub fn decode(address: u64, bytes: &[u8]) -> Result<Instruction, SimError> {
             vec![format!("memory[{}]", reg(t))],
         ),
         15 => (
-            format!("jmpLE {}<=R0, {xy:02X}h", reg(r)),
-            format!("if signed8({}) <= signed8(R0): PC = {xy:02X}h", reg(r)),
+            format!("jmpLE {}<=R0, 0x{xy:02X}", reg(r)),
+            format!("if signed8({}) <= signed8(R0): PC = 0x{xy:02X}", reg(r)),
             vec![reg(r), "R0".into()],
             vec!["PC".into()],
         ),
         _ => {
             return Err(SimError(format!(
-                "Invalid VOLE instruction {:02X}{:02X} at {address:02X}h: unknown opcode or nonzero reserved bits",
+                "Invalid VOLE instruction {:02X}{:02X} at 0x{address:02X}: unknown opcode or nonzero reserved bits",
                 bytes[0], bytes[1]
             )));
         }
