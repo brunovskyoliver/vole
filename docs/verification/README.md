@@ -109,3 +109,83 @@ hosts.
 
 Review result: Standards has zero hard breaches and two maintenance observations;
 Spec's two code findings are closed, with two external acceptance limits open.
+
+## C compilation and source debugging
+
+Checks recorded on 2026-10-03 for the C release, on Linux x64 with the host's
+Clang/LLD 14.0.6. [Per-suite results](c-workspace-tests.txt): 189 tests
+pass (one throughput benchmark is ignored by design), with strict Clippy and
+formatting clean.
+
+![x64 paused at a breakpoint inside swap](screenshots/c-x64-breakpoint-in-swap.png)
+
+### Performed natively on this Linux host
+
+- **Native GPUI window under X11/Xvfb**: C mode on all four guests, at
+  1440×940, 1280×800 and 720×520, with real keyboard input. See the
+  [interaction receipt](c-native-interactions.json) and screenshots:
+  [x64 ready in startup code](screenshots/c-x64-ready.png),
+  [Step into and Step over](screenshots/c-x64-step-over.png),
+  [breakpoint in a callee](screenshots/c-x64-breakpoint-in-swap.png),
+  [Step out with changed values](screenshots/c-x64-step-out.png),
+  [ARM64 paused in a loop](screenshots/c-arm64-paused-in-sum.png),
+  [ARM64 -O1 register-held variable](screenshots/c-arm64-o1-paused.png),
+  [expanded array](screenshots/c-arm64-expanded-array.png),
+  [location chip outlining bytes in memory](screenshots/c-arm64-location-chip.png),
+  [ARM32 laptop layout](screenshots/c-arm32-1280.png),
+  [x86 compact variables](screenshots/c-x86-compact-variables.png),
+  [unsupported-feature diagnostics](screenshots/c-diagnostics.png),
+  [reopened version 2 project hitting its saved breakpoint](screenshots/c-x64-project-reopened.png)
+  and [assembly mode unchanged](screenshots/asm-arm64-after-c.png).
+  Reverse instruction steps after source steps were observed decreasing the
+  executed count one instruction per press.
+- **CLI and engines**: `scripts/verify-engines.py` compiles and runs a C
+  program with hand-computed output (`Vole C 30 120 30`, exit status 0) on
+  ARM64, x64, ARM32 and x86, alongside the five assembly round trips
+  ([result](c-engine-verification.json)).
+- **Portable package**: a release build packaged with `scripts/package.py`
+  bundled `clang`, `ld.lld`, `llvm-mc` and Clang's resource headers under
+  `toolchain/`, and the packaged CLI compiled and ran the C smoke program on
+  all four targets with `PATH=/usr/bin:/bin` and every `VOLE_*` override
+  removed.
+
+### Host-independent tests (run here; CI runs the same on each runner)
+
+- **Compiler** (`vole-c`): every example builds and runs on four targets at
+  `-O0` and `-O1`; DWARF extraction is cross-checked against
+  `llvm-dwarfdump`; pre-check, Clang and LLD diagnostics; struct copies;
+  zero-initialized-only data; and seven spellings of a host-file include,
+  plus the dependency gate on its own.
+- **Interpreters** (`vole-isa-scalar`): 31 fixture tests with about 115
+  hand-computed cases, reversal and atomic faults for each new instruction
+  family, and a 40-build C corpus checked against independent Rust models.
+- **Debugger and runtime**: real-C acceptance per target (loop breakpoints,
+  Step Into/Over/Out through nested calls, call stacks, locals, pointers,
+  arrays and globals, reverse after source steps, project save and reopen),
+  optimized recursion stepping at `-O0` and `-O1` on all four targets,
+  repeated-refresh change highlighting, crafted debug metadata and batch
+  boundary stops.
+
+### Not performed in this environment
+
+The pinned LLVM 18.1.8 build with Clang (`scripts/build-toolchain.py`), the
+macOS app bundle's Homebrew Clang launcher and the Windows toolchain are
+configured in the scripts and CI workflows but were **not** executed here.
+macOS and Windows native C workbench behavior remains unverified until CI or
+a person runs the [native acceptance checks](../native-verification.md).
+
+### Review
+
+An independent review of the C changes reproduced and reported: a host-file
+read through preprocessor spellings the lexical check missed (fixed with the
+Clang dependency gate and Clang-compatible source normalization), ARM64
+`-O1` Step Over/Out errors caused by Clang's call-site-only frame information
+(fixed by following executed calls and returns), `.bss`-only programs failing
+to link, two host panics from guest operands (x64 `idiv`, ARM32 `ldmda`),
+crafted debug metadata that could overflow the stack or hang rendering, a
+stale view after a stop at a batch boundary, and five workbench logic issues
+(target switching during compilation, line mapping against a failed build,
+snapped breakpoints, breakpoints not following edits, settings reset on
+open). Each has a regression test or screenshot. Remaining documented
+limits: token pasting can probe whether a host path exists (not its
+contents), and a breakpoint inside deleted text is dropped rather than moved.

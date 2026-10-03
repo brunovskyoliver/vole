@@ -190,6 +190,70 @@ pub fn unavailable_text(reason: &str) -> String {
     format!("unavailable: {reason}")
 }
 
+/// Requested line to toggle when the user clicks the breakpoint mark of
+/// `line`. A breakpoint set on a line without code snaps forward and is shown
+/// on the line it resolves to; clicking there removes that stored breakpoint
+/// instead of adding a second one.
+pub fn breakpoint_line_to_toggle(
+    line: usize,
+    stored: impl IntoIterator<Item = (usize, Option<usize>)>,
+) -> usize {
+    let stored: Vec<_> = stored.into_iter().collect();
+    if stored.iter().any(|(requested, _)| *requested == line) {
+        return line;
+    }
+    stored
+        .iter()
+        .find(|(_, resolved)| *resolved == Some(line))
+        .map_or(line, |(requested, _)| *requested)
+}
+
+/// Move 1-based breakpoint lines to follow an edit from `old` to `new`.
+///
+/// The edit is located by the longest common prefix and suffix of lines.
+/// Lines before the change stay, lines after it shift by the change in line
+/// count, and lines inside the changed region keep their number while it still
+/// exists in the new text; lines whose text was deleted are dropped.
+pub fn shift_breakpoint_lines(
+    old: &str,
+    new: &str,
+    lines: &std::collections::BTreeSet<usize>,
+) -> std::collections::BTreeSet<usize> {
+    let old_lines: Vec<&str> = old.split('\n').collect();
+    let new_lines: Vec<&str> = new.split('\n').collect();
+    let prefix = old_lines
+        .iter()
+        .zip(&new_lines)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let limit = old_lines.len().min(new_lines.len()) - prefix;
+    let suffix = old_lines
+        .iter()
+        .rev()
+        .zip(new_lines.iter().rev())
+        .take(limit)
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_end = old_lines.len() - suffix;
+    let new_region = new_lines.len() - suffix - prefix;
+    let delta = new_lines.len() as isize - old_lines.len() as isize;
+    lines
+        .iter()
+        .filter_map(|line| {
+            let index = line.checked_sub(1)?;
+            if index < prefix {
+                Some(*line)
+            } else if index >= old_end {
+                usize::try_from(index as isize + delta).ok().map(|i| i + 1)
+            } else if index - prefix < new_region {
+                Some(*line)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,5 +391,59 @@ mod tests {
             unavailable_text("PC is outside"),
             "unavailable: PC is outside"
         );
+    }
+
+    #[test]
+    fn snapped_breakpoints_toggle_their_stored_line() {
+        let stored = [(4, Some(5)), (9, Some(9))];
+        assert_eq!(breakpoint_line_to_toggle(5, stored), 4);
+        assert_eq!(breakpoint_line_to_toggle(9, stored), 9);
+        assert_eq!(breakpoint_line_to_toggle(7, stored), 7);
+        // A breakpoint stored on the line itself wins over one that snapped to it.
+        assert_eq!(
+            breakpoint_line_to_toggle(5, [(4, Some(5)), (5, Some(5))]),
+            5
+        );
+    }
+
+    fn set(lines: &[usize]) -> std::collections::BTreeSet<usize> {
+        lines.iter().copied().collect()
+    }
+
+    #[test]
+    fn breakpoints_follow_inserted_and_deleted_lines() {
+        let old = "a\nb\nc\nd\ne\n";
+        // Insert two lines after b: c, d and e move down by two.
+        let new = "a\nb\nx\ny\nc\nd\ne\n";
+        assert_eq!(
+            shift_breakpoint_lines(old, new, &set(&[1, 2, 3, 5])),
+            set(&[1, 2, 5, 7])
+        );
+        // Delete c and d: a breakpoint on them is dropped, e moves up.
+        let new = "a\nb\ne\n";
+        assert_eq!(
+            shift_breakpoint_lines(old, new, &set(&[2, 3, 4, 5])),
+            set(&[2, 3])
+        );
+        // Editing inside a line keeps every breakpoint.
+        let new = "a\nb\nC changed\nd\ne\n";
+        assert_eq!(
+            shift_breakpoint_lines(old, new, &set(&[3, 4])),
+            set(&[3, 4])
+        );
+        // Splitting a line with Enter keeps the breakpoint on its first half.
+        let new = "a\nb\nc1\nc2\nd\ne\n";
+        assert_eq!(
+            shift_breakpoint_lines(old, new, &set(&[3, 4])),
+            set(&[3, 5])
+        );
+        // A blank line typed above a breakpoint moves it down.
+        let new = "\na\nb\nc\nd\ne\n";
+        assert_eq!(
+            shift_breakpoint_lines(old, new, &set(&[1, 5])),
+            set(&[2, 6])
+        );
+        // Identical text changes nothing.
+        assert_eq!(shift_breakpoint_lines(old, old, &set(&[2])), set(&[2]));
     }
 }

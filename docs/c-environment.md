@@ -37,7 +37,7 @@ have been compiled once per target.
 | ARM 32-bit (A32) | `armv7a-none-eabi` | `-marm -mfloat-abi=soft -mno-unaligned-access` |
 | x86 32-bit | `i386-none-elf` | `-mgeneral-regs-only` |
 
-Every document is compiled with `-std=c17 -ffreestanding -fno-builtin
+Every document is compiled with `-std=c17 -fno-trigraphs -ffreestanding -fno-builtin
 -nostdlibinc -fno-pic -fno-pie -fno-stack-protector -fno-exceptions
 -fno-asynchronous-unwind-tables -fno-unwind-tables -fno-omit-frame-pointer
 -fno-common -fno-vectorize -fno-slp-vectorize -gdwarf-5
@@ -140,10 +140,22 @@ Reported before Clang runs, with the line, column and an explanation:
 - `_Complex`/`_Imaginary`, `__int128`, `_Atomic` and thread-local storage;
 - inline assembly (`asm`, `__asm__`);
 - `#include` of anything outside the allowed headers, `#include_next`,
-  `#import`, `#embed`, `#line`, `__has_include`, `_Pragma`, and pragmas other
-  than `#pragma once` and diagnostic pragmas. These checks handle comments,
-  backslash line continuations and macro-form includes, so documents cannot
-  read host files.
+  `#import`, `#embed`, `#line` and line markers, `__has_include`, `_Pragma`,
+  and pragmas other than `#pragma once` and diagnostic pragmas. The check reads
+  the document as the preprocessor does: byte order marks, CR line ends,
+  backslash continuations (including trailing spaces) and the `%:` digraph.
+
+These checks exist for clear messages; they are not the security boundary.
+Before compiling, Vole runs Clang's preprocessor with `-M` and reads the list
+of files Clang actually opened. If it names anything other than the document,
+the private `vole.h` and Clang's own resource headers, the build stops and
+the preprocessor's output is withheld, so a document cannot read files on the
+computer however an include is spelled. Token pasting can still form
+`__has_include` or `_Pragma` after the lexical check; that can reveal whether
+a host path exists, but not its contents. A pasted `float` is not caught by
+the scope check and either compiles without floating-point instructions or is
+rejected by Clang or the linker. Every tool's private directory is limited to
+64 MiB while it runs, including temporary files the tool renames at the end.
 
 Calling a function that is neither in the document nor the runtime, such as
 `malloc`, `scanf` or `fopen`, is an error that explains the freestanding
@@ -190,7 +202,11 @@ indices, a 32- or 64-bit target and present debug information.
 it moves to the end of the prologue so parameters are readable. A line without
 code snaps forward to the next line with code; the status bar says which line
 and address are used, or that nothing after the line has code. Breakpoints are
-stored as line numbers and re-resolved after every build, load and restore.
+stored as line numbers, move with lines inserted or deleted above them (a
+breakpoint inside deleted text is removed), and are re-resolved after every
+build, load and restore. While the document differs from the last successful
+build, the machine-code pane keeps showing that build's own C text and the
+editor shows no execution marks.
 Instruction breakpoints set in the machine-code pane are kept separately.
 
 **Step into** (F11) runs until the PC reaches the start of a user `is_stmt`

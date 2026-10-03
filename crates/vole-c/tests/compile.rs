@@ -646,3 +646,48 @@ fn zero_initialized_globals_alone_build_and_run() {
         }
     }
 }
+
+/// Every spelling of an include that Clang accepts is checked against the
+/// files Clang actually opened, so documents cannot read host files.
+#[test]
+fn documents_cannot_read_host_files() {
+    if !toolchain() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let secret = directory.path().join("secret.h");
+    std::fs::write(&secret, "int secret_value_from_host = 42;\n").unwrap();
+    let path = secret.display().to_string();
+    let attempts = [
+        format!("%:include \"{path}\"\nint main(void) {{ return 0; }}\n"),
+        format!("??=include \"{path}\"\nint main(void) {{ return 0; }}\n"),
+        format!("\u{feff}#include \"{path}\"\nint main(void) {{ return 0; }}\n"),
+        format!("int x;\r#include \"{path}\"\nint main(void) {{ return 0; }}\n"),
+        format!("#inc\\ \nlude \"{path}\"\nint main(void) {{ return 0; }}\n"),
+        format!(
+            "#define FILE \"{path}\"\n#define GO(x) x\nint main(void) {{ return 0; }}\n%:include FILE\n"
+        ),
+        format!(
+            "#define CAT(a, b) a##b\n#define P(x) CAT(_Pr, agma)(x)\nP(\"clang system_header\")\n%:include \"{path}\"\nint main(void) {{ return 0; }}\n"
+        ),
+    ];
+    for (index, source) in attempts.iter().enumerate() {
+        let result = vole_c::compile(Architecture::X64, source, &settings(Optimization::O0));
+        let diagnostics = match result {
+            Ok(program) => panic!(
+                "attempt {index} built; host symbol present: {}",
+                program.symbols.contains_key("secret_value_from_host")
+            ),
+            Err(diagnostics) => diagnostics,
+        };
+        for diagnostic in &diagnostics {
+            let text = format!("{} {:?}", diagnostic.message, diagnostic.hint);
+            assert!(
+                !text.contains("secret_value_from_host"),
+                "attempt {index} leaked host content: {text}"
+            );
+        }
+    }
+    let ok = "#include <vole.h>\n#include <stdint.h>\n#include <stdbool.h>\n#include <limits.h>\nint main(void) { return INT8_MAX > 0 && true; }\n";
+    vole_c::compile(Architecture::X64, ok, &settings(Optimization::O0)).unwrap();
+}

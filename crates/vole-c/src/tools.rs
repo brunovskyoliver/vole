@@ -11,6 +11,8 @@ use std::{
 
 /// Largest object file or linked image accepted from a tool.
 const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+/// Everything a tool may write into its private directory while it runs.
+const MAX_DIRECTORY: u64 = 64 * 1024 * 1024;
 /// Diagnostics beyond this size stop the tool; only the first part is read.
 const MAX_DIAGNOSTICS: u64 = 1024 * 1024;
 const READ_DIAGNOSTICS: u64 = 256 * 1024;
@@ -111,6 +113,59 @@ pub(crate) fn clang() -> Result<Clang, String> {
     Ok(Clang { path, resource_dir })
 }
 
+/// Directory of Clang's freestanding headers, from the explicit resource
+/// directory or by asking the driver. Cached per driver for the process.
+pub(crate) fn resource_include(clang: &Clang) -> Result<PathBuf, String> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Clang, PathBuf>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(path) = cache
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(clang).cloned())
+    {
+        return Ok(path);
+    }
+    let resource = match &clang.resource_dir {
+        Some(directory) => directory.clone(),
+        None => {
+            let mut command = Command::new(&clang.path);
+            command
+                .arg("-print-resource-dir")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null());
+            for name in SCRUBBED_ENVIRONMENT {
+                command.env_remove(name);
+            }
+            let output = command
+                .output()
+                .map_err(|e| format!("Cannot run {}: {e}", clang.path.display()))?;
+            PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+        }
+    };
+    let include = fs::canonicalize(resource.join("include"))
+        .map_err(|e| format!("Clang's resource headers are missing: {e}"))?;
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(clang.clone(), include.clone());
+    }
+    Ok(include)
+}
+
+/// Total size of the files directly inside `directory`, including tools'
+/// temporary outputs that are renamed only when they finish.
+fn directory_size(directory: &Path) -> u64 {
+    fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| entry.metadata().ok())
+                .filter(|metadata| metadata.is_file())
+                .map(|metadata| metadata.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 /// Locate the Clang driver used for C documents, with an installation hint on failure.
 pub fn clang_status() -> Result<PathBuf, String> {
     clang().map(|clang| clang.path)
@@ -164,6 +219,7 @@ pub(crate) fn run_tool(
         if elapsed > deadline
             || fs::metadata(output).is_ok_and(|m| m.len() > MAX_OUTPUT)
             || fs::metadata(&errors).is_ok_and(|m| m.len() > MAX_DIAGNOSTICS)
+            || directory_size(directory) > MAX_DIRECTORY
         {
             let _ = child.kill();
             let _ = child.wait();

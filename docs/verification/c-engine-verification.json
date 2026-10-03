@@ -1,0 +1,62 @@
+{
+  "host": "Linux",
+  "binary": "/home/brunovsky/.t3/projects/vole/target/debug/vole-cli",
+  "targets": {
+    "vole": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    },
+    "arm32": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 6,
+      "stored_value": 125
+    },
+    "arm64": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 6,
+      "stored_value": 125
+    },
+    "x86": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    },
+    "x64": {
+      "assembled_example": "pass",
+      "raw_export_import": "pass",
+      "instructions": 5,
+      "stored_value": 125
+    }
+  },
+  "c_targets": {
+    "arm64": {
+      "compiled_c": "pass",
+      "instructions": 2113,
+      "output": "Vole C 30 120 30\n",
+      "exit_status": 0
+    },
+    "x64": {
+      "compiled_c": "pass",
+      "instructions": 1919,
+      "output": "Vole C 30 120 30\n",
+      "exit_status": 0
+    },
+    "arm32": {
+      "compiled_c": "pass",
+      "instructions": 6950,
+      "output": "Vole C 30 120 30\n",
+      "exit_status": 0
+    },
+    "x86": {
+      "compiled_c": "pass",
+      "instructions": 6594,
+      "output": "Vole C 30 120 30\n",
+      "exit_status": 0
+    }
+  }
+}

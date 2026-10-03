@@ -350,6 +350,7 @@ fn run_c(
     };
     let mut stops = Vec::new();
     let mut remaining_steps = steps.map_or(0, |(_, count)| count);
+    let mut exhausted = false;
     loop {
         let state = session.view().state;
         if matches!(state, RunState::Halted | RunState::Faulted) || used(session) >= budget {
@@ -366,11 +367,13 @@ fn run_c(
         while session.view().state == RunState::Running {
             if used(session) >= budget {
                 session.apply(Command::Pause)?;
+                exhausted = true;
                 break;
             }
             session.run_batch(vole_runtime::RUN_BATCH);
         }
         if session.view().state == RunState::Paused
+            && !exhausted
             && let Some(debug) = &session.view().debug
         {
             if !json {
@@ -391,12 +394,17 @@ fn run_c(
         .as_ref()
         .ok_or_else(|| SimError("No machine state.".into()))?;
     let exit_status = view.debug.as_ref().and_then(|debug| debug.exit_status);
+    let message = if exhausted {
+        format!("Stopped at the {budget}-instruction budget (--steps).")
+    } else {
+        view.message.clone()
+    };
     let output = String::from_utf8_lossy(&snapshot.output).to_string();
     if json {
         let report = serde_json::json!({
             "architecture": view.architecture.id(),
             "state": view.state.label(),
-            "message": view.message,
+            "message": message,
             "steps": snapshot.steps,
             "output": output,
             "exit_status": exit_status,
@@ -415,7 +423,7 @@ fn run_c(
             view.architecture.name(),
             view.state.label(),
             snapshot.steps,
-            view.message
+            message
         );
         if let Some(status) = exit_status {
             println!("Exit status: {status}");

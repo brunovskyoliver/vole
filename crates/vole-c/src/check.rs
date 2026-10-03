@@ -32,7 +32,13 @@ struct Char {
     column: usize,
 }
 
+/// Read the document the way Clang's preprocessor does: drop a leading byte
+/// order mark, treat CR, CRLF and LF as line ends, splice a backslash
+/// followed by optional horizontal whitespace and a line end, and read the
+/// `%:` digraph as `#`. Trigraphs are disabled with `-fno-trigraphs`.
 fn splice(source: &str) -> Vec<Char> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let source = source.replace("\r\n", "\n").replace('\r', "\n");
     let mut result = Vec::with_capacity(source.len());
     for (index, text) in source.split('\n').enumerate() {
         let line = index + 1;
@@ -52,13 +58,14 @@ fn splice(source: &str) -> Vec<Char> {
         });
     }
     result.pop();
-    // Remove backslash-newline pairs (allowing a carriage return between them).
     let mut spliced = Vec::with_capacity(result.len());
     let mut index = 0;
     while index < result.len() {
         if result[index].value == '\\' {
             let mut next = index + 1;
-            if result.get(next).is_some_and(|c| c.value == '\r') {
+            while result.get(next).is_some_and(|c| {
+                c.value == ' ' || c.value == '\t' || c.value == '\x0c' || c.value == '\x0b'
+            }) {
                 next += 1;
             }
             if result.get(next).is_some_and(|c| c.value == '\n') {
@@ -69,7 +76,21 @@ fn splice(source: &str) -> Vec<Char> {
         spliced.push(result[index]);
         index += 1;
     }
-    spliced
+    let mut normalized: Vec<Char> = Vec::with_capacity(spliced.len());
+    let mut index = 0;
+    while index < spliced.len() {
+        if spliced[index].value == '%' && spliced.get(index + 1).is_some_and(|c| c.value == ':') {
+            normalized.push(Char {
+                value: '#',
+                ..spliced[index]
+            });
+            index += 2;
+        } else {
+            normalized.push(spliced[index]);
+            index += 1;
+        }
+    }
+    normalized
 }
 
 fn forbidden_word(word: &str) -> Option<(String, &'static str)> {
@@ -274,6 +295,12 @@ impl Lexer {
                     allowed_list()
                 ),
             )),
+            name if name.starts_with(|c: char| c.is_ascii_digit()) => diagnostics.push(report(
+                line,
+                column,
+                "Line markers are not available in Vole documents",
+                "The debugger maps every instruction back to the real lines of this document.",
+            )),
             "line" => diagnostics.push(report(
                 line,
                 column,
@@ -399,6 +426,23 @@ mod tests {
         assert!(check("int floaty; int x = 0xE5; int y = 10e;").len() <= 1);
         assert_eq!(lines("int x; fl\\\noat y;"), [(1, 8)]);
         assert!(check("#define S \"a\\\" float\"\nint x;").is_empty());
+    }
+
+    #[test]
+    fn source_is_read_like_the_preprocessor() {
+        let reported = |source: &str| {
+            lines(source)
+                .into_iter()
+                .map(|(line, _)| line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(reported("%:include \"/etc/passwd\""), [1]);
+        assert_eq!(reported("\u{feff}#include </etc/passwd>"), [1]);
+        assert_eq!(reported("int x;\r#include </etc/passwd>"), [2]);
+        assert_eq!(reported("#inc\\ \nlude </etc/passwd>"), [2]);
+        assert_eq!(reported("# 900 \"/etc/hosts\""), [1]);
+        assert_eq!(reported("#line 9"), [1]);
+        assert!(check("int x;\r\nint y;\r\n").is_empty());
     }
 
     #[test]

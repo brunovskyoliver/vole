@@ -132,6 +132,8 @@ fn target(architecture: Architecture) -> Option<Target> {
 /// Contract flags shared by the document and the runtime, before optimization.
 const COMMON_FLAGS: &[&str] = &[
     "-std=c17",
+    // Trigraphs (`??=` for `#`) are obsolete and would hide directives from review.
+    "-fno-trigraphs",
     "-ffreestanding",
     "-fno-builtin",
     "-nostdlibinc",
@@ -179,6 +181,105 @@ fn invocation(clang: &Clang, flags: &[String], input: &str, output: &str) -> Vec
         args.push(arg.into());
     }
     args
+}
+
+const HOST_FILE: &str =
+    "A Vole document can only include <vole.h> and Clang's freestanding headers";
+
+fn host_file_error() -> Vec<Diagnostic> {
+    vec![Diagnostic::new(1, HOST_FILE).with_hint(format!(
+        "The preprocessor tried to open a file outside the allowed headers ({}). \
+         Documents cannot read other files on this computer.",
+        check::ALLOWED_HEADERS.join(", ")
+    ))]
+}
+
+/// Preprocess first and let Clang list every file it opened. That list, not
+/// the lexical pre-check, decides what a document may read: a build stops,
+/// with the preprocessor's own output withheld, if anything outside the
+/// private `include` directory and Clang's resource headers was opened.
+fn dependency_gate(
+    clang: &Clang,
+    flags: &[String],
+    directory: &Path,
+    source: &str,
+) -> Result<(), Vec<Diagnostic>> {
+    let resource = tools::resource_include(clang).map_err(error)?;
+    let private = fs::canonicalize(directory.join("include")).map_err(|e| error(e.to_string()))?;
+    let document =
+        fs::canonicalize(directory.join(dwarf::USER_FILE)).map_err(|e| error(e.to_string()))?;
+    let allowed = |path: &Path| {
+        fs::canonicalize(directory.join(path)).is_ok_and(|path| {
+            path == document || path.starts_with(&private) || path.starts_with(&resource)
+        })
+    };
+    let mut args: Vec<OsString> = invocation(clang, flags, dwarf::USER_FILE, "main.o")
+        .into_iter()
+        .take_while(|arg| arg != "-c")
+        .collect();
+    for arg in ["-M", "-MT", "main", "-MF", "main.d", dwarf::USER_FILE] {
+        args.push(arg.into());
+    }
+    let deps_path = directory.join("main.d");
+    let output =
+        run_tool(&clang.path, &args, directory, &deps_path, CLANG_DEADLINE).map_err(error)?;
+    if !output.success {
+        // Report only positions in the document itself; anything that names
+        // another file (or a missing one) gets the generic explanation.
+        let foreign = output.diagnostics.lines().any(|line| {
+            line.contains("file not found")
+                || line.contains("cannot open")
+                || line.starts_with("In file included from")
+                || line
+                    .split_once(": ")
+                    .and_then(|(position, _)| position.split(':').next())
+                    .is_some_and(|file| {
+                        !file.is_empty()
+                            && file != dwarf::USER_FILE
+                            && !file.starts_with("clang")
+                            && !allowed(Path::new(file))
+                    })
+        });
+        if foreign {
+            return Err(host_file_error());
+        }
+        let messages = diagnostics::clang(&output.diagnostics, source);
+        return Err(if messages.iter().any(Diagnostic::is_error) {
+            messages
+        } else {
+            error("Preprocessing failed")
+        });
+    }
+    let deps = fs::read_to_string(&deps_path).map_err(|e| error(e.to_string()))?;
+    let deps = deps.replace("\\\r\n", " ").replace("\\\n", " ");
+    let files = deps.split_once(": ").map_or("", |(_, files)| files);
+    // Make-style escaping: a backslash protects the following space.
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut chars = files.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars
+                .peek()
+                .is_some_and(|next| *next == ' ' || *next == '#') =>
+            {
+                current.push(chars.next().unwrap_or(' '));
+            }
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    paths.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        paths.push(current);
+    }
+    if paths.is_empty() || paths.iter().any(|path| !allowed(Path::new(path))) {
+        return Err(host_file_error());
+    }
+    Ok(())
 }
 
 fn error(message: impl Into<String>) -> Vec<Diagnostic> {
@@ -338,6 +439,7 @@ fn link(
         .map_err(|e| error(e.to_string()))?;
 
     let flags = c_flags(target, settings);
+    dependency_gate(&clang, &flags, directory, source)?;
     let object_path = directory.join("main.o");
     let output = run_tool(
         &clang.path,
@@ -554,6 +656,38 @@ mod tests {
     use super::*;
     use std::process::Command;
     use vole_core::{Optimization, debug::Location};
+
+    /// The gate itself, without the lexical pre-check in front of it.
+    #[test]
+    fn dependency_gate_allows_only_private_and_resource_headers() {
+        let Ok(clang) = tools::clang() else {
+            return;
+        };
+        let target = target(Architecture::X64).unwrap();
+        let flags = c_flags(&target, &CompilerSettings::default());
+        let host = tempfile::tempdir().unwrap();
+        let secret = host.path().join("secret.h");
+        fs::write(&secret, "int secret_value_from_host;\n").unwrap();
+        let gate = |source: &str| {
+            let directory = tempfile::tempdir().unwrap();
+            fs::create_dir(directory.path().join("include")).unwrap();
+            fs::write(directory.path().join("include/vole.h"), VOLE_H).unwrap();
+            fs::write(directory.path().join(dwarf::USER_FILE), source).unwrap();
+            dependency_gate(&clang, &flags, directory.path(), source)
+        };
+        gate("#include <vole.h>\n#include <stdint.h>\nint main(void) { return 0; }\n").unwrap();
+        for source in [
+            format!(
+                "#include \"{}\"\nint main(void) {{ return 0; }}\n",
+                secret.display()
+            ),
+            "#include \"/no/such/vole/file.h\"\nint main(void) { return 0; }\n".to_string(),
+        ] {
+            let errors = gate(&source).unwrap_err();
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert_eq!(errors[0].message, HOST_FILE);
+        }
+    }
 
     const TARGETS: [Architecture; 4] = [
         Architecture::Arm64,

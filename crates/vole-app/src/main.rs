@@ -146,6 +146,11 @@ struct Workbench {
     pending_breakpoint_line: Option<usize>,
     breakpoint_note: Option<String>,
     revealed_line: Option<usize>,
+    /// Target of a build or restore the worker has not reported yet.
+    pending_build: Option<Architecture>,
+    /// Breakpoint lines last sent after an edit, until the worker publishes them.
+    sent_breakpoints: Option<BTreeSet<usize>>,
+    build_started: bool,
     output_len: usize,
     output_scroll: ScrollHandle,
     selected: u64,
@@ -190,7 +195,9 @@ impl Workbench {
                 Ok(loaded) => {
                     architecture = loaded.architecture;
                     language = loaded.language;
-                    settings = loaded.settings.clone();
+                    if let Some(saved) = loaded.settings.clone() {
+                        settings = saved;
+                    }
                     source = loaded.source.clone();
                     document = Some(loaded);
                 }
@@ -325,6 +332,9 @@ impl Workbench {
             pending_breakpoint_line: None,
             breakpoint_note: None,
             revealed_line: None,
+            pending_build: None,
+            sent_breakpoints: None,
+            build_started: false,
             output_len: 0,
             output_scroll: ScrollHandle::new(),
             selected: memory_base,
@@ -358,6 +368,16 @@ impl Workbench {
                 if matches!(event, InputEvent::Change) {
                     let source = editor.read(cx).value().to_string();
                     if source != this.last_source {
+                        if this.language == SourceLanguage::C {
+                            // Breakpoints are stored by line; keep them on their code.
+                            let stored = this.source_breakpoint_lines();
+                            let shifted =
+                                cmodel::shift_breakpoint_lines(&this.last_source, &source, &stored);
+                            if shifted != stored {
+                                this.sent_breakpoints = Some(shifted.clone());
+                                this.send(Command::SetSourceBreakpoints(shifted), cx);
+                            }
+                        }
                         this.last_source = source.clone();
                         this.syntax_decoration
                             .set(syntax::tokens(this.language, &source), cx);
@@ -398,6 +418,19 @@ impl Workbench {
         ) {
             self.breakpoint_note = None;
         }
+        // Until the worker reports the image we asked for, its views still name
+        // the previous target; the toolbar keeps the user's choice meanwhile.
+        match &command {
+            Command::Build { architecture, .. } => {
+                self.pending_build = Some(*architecture);
+                self.build_started = false;
+            }
+            Command::Restore { program, .. } => {
+                self.pending_build = Some(program.architecture);
+                self.build_started = false;
+            }
+            _ => {}
+        }
         if let Err(error) = self.runtime.send(command) {
             self.edit_error = Some(error.to_string());
         }
@@ -413,7 +446,30 @@ impl Workbench {
             let new_pc = next.snapshot.as_ref().map(|s| s.pc);
             let breakpoints_changed = next.source_breakpoints != self.view.source_breakpoints;
             self.view = next;
-            self.architecture = self.view.architecture;
+            if self
+                .sent_breakpoints
+                .as_ref()
+                .is_some_and(|sent| sent.iter().eq(self.view.source_breakpoints.keys()))
+            {
+                self.sent_breakpoints = None;
+            }
+            // A build is reported once the worker names its target, or once it
+            // has been seen compiling and finished (including failed builds).
+            if self.pending_build.is_some() && self.view.state == RunState::Assembling {
+                self.build_started = true;
+            }
+            if self.view.state != RunState::Assembling
+                && (self.build_started
+                    || self
+                        .pending_build
+                        .is_some_and(|wanted| wanted == self.view.architecture))
+            {
+                self.pending_build = None;
+                self.build_started = false;
+            }
+            if self.pending_build.is_none() && self.view.state != RunState::Assembling {
+                self.architecture = self.view.architecture;
+            }
             let layout = if self.image_matches() {
                 cmodel::MachineLayout::new(
                     &self.view.disassembly,
@@ -495,6 +551,7 @@ impl Workbench {
         if cursor_line != self.last_editor_line {
             self.last_editor_line = cursor_line;
             if self.language == SourceLanguage::C
+                && self.image_current()
                 && let Some(row) = self
                     .machine_layout
                     .first_header_for_line(cursor_line as usize + 1)
@@ -506,6 +563,7 @@ impl Workbench {
                 .view
                 .disassembly
                 .iter()
+                .filter(|_| self.image_current())
                 .find(|i| i.source_line == Some(cursor_line as usize + 1))
             {
                 let address = instruction.address;
@@ -580,13 +638,35 @@ impl Workbench {
         if self.language == SourceLanguage::C {
             // The PC fill wins on a shared line; mixing both tints reads as neither.
             let current = self.current_line();
-            breakpoints.extend(
-                self.view
-                    .source_breakpoints
-                    .keys()
-                    .filter(|line| Some(**line) != current)
-                    .filter_map(|line| decoration(*line, rgba(0xe4b48b2e).into())),
-            );
+            let image_current = self.image_current();
+            let color: Hsla = rgba(0xe4b48b2e).into();
+            let blank = |line: usize| {
+                line_ranges
+                    .get(line.saturating_sub(1))
+                    .is_none_or(|range| source[range.clone()].trim().is_empty())
+            };
+            for breakpoint in self.view.source_breakpoints.values() {
+                // A breakpoint on a blank line is drawn on the line it stops at;
+                // before that is known, a one-character mark keeps it visible.
+                let line = match breakpoint.resolved_line {
+                    Some(resolved) if image_current && blank(breakpoint.line) => resolved,
+                    _ => breakpoint.line,
+                };
+                if Some(line) == current {
+                    continue;
+                }
+                let mark = decoration(line, color).or_else(|| {
+                    line_ranges
+                        .get(line.saturating_sub(1))
+                        .filter(|range| range.start < source.len())
+                        .map(|range| {
+                            RangeDecoration::new(range.start..range.start + 1)
+                                .with_style(RangeDecorationStyle::Fill)
+                                .with_color(color)
+                        })
+                });
+                breakpoints.extend(mark);
+            }
         }
         self.breakpoint_decoration.set(breakpoints, cx);
         let diagnostics = self
@@ -601,7 +681,7 @@ impl Workbench {
     /// Line containing the PC: the debugger's user location for C, otherwise the
     /// current instruction's source line.
     fn current_line(&self) -> Option<usize> {
-        if !self.image_matches() {
+        if !self.image_current() {
             return None;
         }
         if self.language == SourceLanguage::C {
@@ -621,7 +701,7 @@ impl Workbench {
     }
     /// Line of a selected caller frame, shown with a quieter tint than the PC line.
     fn selected_frame_line(&self) -> Option<usize> {
-        if self.selected_frame == 0 {
+        if self.selected_frame == 0 || !self.image_current() {
             return None;
         }
         self.view
@@ -656,7 +736,7 @@ impl Workbench {
         let Some(line) = self.pending_breakpoint_line else {
             return;
         };
-        let built = self.view.program.is_some() && !self.view.dirty;
+        let built = self.image_current() && !self.view.dirty;
         self.breakpoint_note = Some(match self.view.source_breakpoints.get(&line) {
             None => format!("Removed the breakpoint on line {line}."),
             Some(_) if !built => {
@@ -686,6 +766,19 @@ impl Workbench {
             .as_ref()
             .is_some_and(|p| p.language == self.language)
     }
+    /// True when line numbers in the image describe the editor's text. In C a
+    /// failed build keeps the previous image, so its lines may not match.
+    /// Assembly keeps its earlier behavior of mapping the last image.
+    fn image_current(&self) -> bool {
+        self.image_matches()
+            && self.pending_build.is_none()
+            && (self.language == SourceLanguage::Assembly
+                || self
+                    .view
+                    .program
+                    .as_ref()
+                    .is_some_and(|p| p.source == self.last_source))
+    }
     fn untitled_name(&self) -> String {
         match self.language {
             SourceLanguage::C => "Untitled.c".into(),
@@ -695,6 +788,7 @@ impl Workbench {
     fn can_execute(&self) -> bool {
         self.view.snapshot.is_some()
             && self.image_matches()
+            && self.pending_build.is_none()
             && !matches!(
                 self.view.state,
                 RunState::Editing
@@ -706,6 +800,7 @@ impl Workbench {
     }
     fn paused(&self) -> bool {
         self.view.snapshot.is_some()
+            && self.pending_build.is_none()
             && !matches!(
                 self.view.state,
                 RunState::Running | RunState::Assembling | RunState::Editing
@@ -773,6 +868,18 @@ impl Workbench {
     fn toggle_breakpoint(&mut self, _: &ToggleBreakpoint, _: &mut Window, cx: &mut Context<Self>) {
         let line = self.editor.read(cx).cursor_position().line as usize + 1;
         if self.language == SourceLanguage::C {
+            // F9 on the line a snapped breakpoint is drawn on removes that breakpoint.
+            let line = if self.image_current() {
+                cmodel::breakpoint_line_to_toggle(
+                    line,
+                    self.view
+                        .source_breakpoints
+                        .values()
+                        .map(|b| (b.line, b.resolved_line)),
+                )
+            } else {
+                line
+            };
             self.toggle_source_breakpoint(line, cx);
             return;
         }
@@ -785,7 +892,19 @@ impl Workbench {
             .unwrap_or(self.selected);
         self.send(Command::ToggleBreakpoint(address), cx);
     }
+    /// Stored breakpoint lines, including a set sent to the worker that its
+    /// published view does not show yet (typing can outpace the worker).
+    fn source_breakpoint_lines(&self) -> BTreeSet<usize> {
+        self.sent_breakpoints
+            .clone()
+            .unwrap_or_else(|| self.view.source_breakpoints.keys().copied().collect())
+    }
     fn toggle_source_breakpoint(&mut self, line: usize, cx: &mut Context<Self>) {
+        if let Some(lines) = self.sent_breakpoints.as_mut()
+            && !lines.remove(&line)
+        {
+            lines.insert(line);
+        }
         self.pending_breakpoint_line = Some(line);
         self.send(Command::ToggleSourceBreakpoint(line), cx);
     }
@@ -829,6 +948,7 @@ impl Workbench {
         };
         self.memory_base = self.selected;
         self.send(Command::SetBreakpoints(BTreeSet::new()), cx);
+        self.sent_breakpoints = Some(BTreeSet::new());
         self.send(Command::SetSourceBreakpoints(BTreeSet::new()), cx);
         let command = self.build_command(source);
         self.send(command, cx);
@@ -872,8 +992,13 @@ impl Workbench {
             cx.notify();
             return;
         }
+        if matches!(self.view.state, RunState::Running | RunState::Assembling)
+            || self.pending_build.is_some()
+        {
+            return;
+        }
         self.settings.optimization = optimization;
-        if self.view.state != RunState::Running {
+        {
             let command = self.build_command(self.source(cx));
             self.send(command, cx);
         }
@@ -1265,7 +1390,10 @@ impl Workbench {
         } = document;
         self.architecture = architecture;
         self.language = language;
-        self.settings = settings;
+        // Plain source files keep the current compiler settings.
+        if let Some(settings) = settings {
+            self.settings = settings;
+        }
         self.selected_frame = 0;
         self.expanded.clear();
         self.breakpoint_note = None;
@@ -1302,6 +1430,7 @@ impl Workbench {
             self.send(command, cx);
         }
         self.send(Command::SetBreakpoints(breakpoints), cx);
+        self.sent_breakpoints = Some(source_breakpoints.clone());
         self.send(Command::SetSourceBreakpoints(source_breakpoints), cx);
     }
     fn export_bytes(&mut self, _: &ExportBytes, _: &mut Window, cx: &mut Context<Self>) {
@@ -1364,8 +1493,11 @@ impl Workbench {
         if !self.view.dirty
             && self.view.source == project.source
             && self.view.program.as_ref().is_some_and(|image| {
-                image.source == project.source && image.language == project.language
+                image.source == project.source
+                    && image.language == project.language
+                    && image.architecture == project.architecture
             })
+            && self.pending_build.is_none()
         {
             project.image = self.view.program.clone();
             project.snapshot = self.view.snapshot.clone();
@@ -1584,7 +1716,7 @@ impl Workbench {
                                 "-O1: optimized; some variables become unavailable. Select to compile with -O0."
                             }
                         })
-                        .disabled(running)
+                        .disabled(building || self.pending_build.is_some())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_optimization(
                                 match optimization {
@@ -3127,6 +3259,10 @@ impl Workbench {
     fn c_status(&self) -> String {
         let pc = self.view.snapshot.as_ref().map(|s| s.pc);
         match self.view.state {
+            _ if self.pending_build.is_some() => format!(
+                "Compiling with Clang {}.",
+                self.settings.optimization.flag()
+            ),
             _ if self.view.state != RunState::Assembling && !self.image_matches() => {
                 "Compile the C source to run it.".into()
             }
@@ -3537,7 +3673,8 @@ struct LoadedDocument {
     path: Option<PathBuf>,
     architecture: Architecture,
     language: SourceLanguage,
-    settings: CompilerSettings,
+    /// Saved compiler settings; `None` for plain files, which keep the current ones.
+    settings: Option<CompilerSettings>,
     source: String,
     breakpoints: BTreeSet<u64>,
     source_breakpoints: BTreeSet<usize>,
@@ -3570,7 +3707,7 @@ fn load_document(
             path: Some(path),
             architecture: p.architecture,
             language: p.language,
-            settings: p.compiler,
+            settings: Some(p.compiler),
             source: p.source,
             breakpoints: p.breakpoints,
             source_breakpoints: p.source_breakpoints,
@@ -3591,7 +3728,7 @@ fn load_document(
         path: None,
         architecture,
         language: SourceLanguage::Assembly,
-        settings: CompilerSettings::default(),
+        settings: None,
         source: String::new(),
         breakpoints: BTreeSet::new(),
         source_breakpoints: BTreeSet::new(),

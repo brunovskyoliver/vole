@@ -94,6 +94,25 @@ impl Workbench {
             .when(count == 0, |panel| {
                 panel.child(div().px(px(20.)).py(px(20.)).child(note(empty)))
             })
+            .when(count > 0 && !self.image_current(), |panel| {
+                panel.child(
+                    div()
+                        .flex_none()
+                        .px(px(20.))
+                        .py(px(8.))
+                        .border_t_1()
+                        .border_color(rgb(DIVIDER))
+                        .child(note(
+                            if self.view.state == RunState::Assembling
+                                || self.pending_build.is_some()
+                            {
+                                "Showing the last successful build while compiling."
+                            } else {
+                                "Showing the last successful build; compile to update."
+                            },
+                        )),
+                )
+            })
             .child(self.decode_strip())
     }
 
@@ -104,13 +123,16 @@ impl Workbench {
         self.machine_layout.group_of_instruction(index)
     }
 
+    /// Breakpoint marks compare the editor's stored lines with the image's
+    /// lines, so they only appear while both describe the same text.
     fn line_has_breakpoint(&self, line: usize) -> bool {
-        self.view.source_breakpoints.contains_key(&line)
-            || self
-                .view
-                .source_breakpoints
-                .values()
-                .any(|b| b.resolved_line == Some(line))
+        self.image_current()
+            && (self.view.source_breakpoints.contains_key(&line)
+                || self
+                    .view
+                    .source_breakpoints
+                    .values()
+                    .any(|b| b.resolved_line == Some(line)))
     }
 
     fn machine_row(&self, row: MachineRow, cx: &mut Context<Self>) -> AnyElement {
@@ -120,9 +142,10 @@ impl Workbench {
         let Some(group) = self.machine_layout.groups.get(group_index) else {
             return div().into_any_element();
         };
+        let current = self.image_current();
         let cursor_line = self.editor.read(cx).cursor_position().line as usize + 1;
         let in_pc_group = self.pc_group() == Some(group_index);
-        let line_selected = group.line == Some(cursor_line);
+        let line_selected = current && group.line == Some(cursor_line);
         let rail = div()
             .w(px(RAIL))
             .h_full()
@@ -158,10 +181,12 @@ impl Workbench {
                         )
                         .into_any_element();
                 };
+                // The image's own source: the editor may hold newer, uncompiled text.
                 let text = self
-                    .last_source
-                    .lines()
-                    .nth(line.saturating_sub(1))
+                    .view
+                    .program
+                    .as_ref()
+                    .and_then(|p| p.source.lines().nth(line.saturating_sub(1)))
                     .unwrap_or("")
                     .trim()
                     .to_string();
@@ -198,7 +223,17 @@ impl Workbench {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.toggle_source_breakpoint(line, cx);
+                        if !this.image_current() {
+                            return;
+                        }
+                        let stored = cmodel::breakpoint_line_to_toggle(
+                            line,
+                            this.view
+                                .source_breakpoints
+                                .values()
+                                .map(|b| (b.line, b.resolved_line)),
+                        );
+                        this.toggle_source_breakpoint(stored, cx);
                     }));
                 base(("group", group_index).into())
                     .role(Role::Row)
@@ -212,7 +247,11 @@ impl Workbench {
                     ))
                     .cursor_pointer()
                     .child(div().w(px(17. - 12.)).flex_none())
-                    .child(dot)
+                    .child(if current {
+                        dot.into_any_element()
+                    } else {
+                        div().w(px(22.)).flex_none().into_any_element()
+                    })
                     .child(
                         div()
                             .w(px(self.address_width()))
@@ -232,11 +271,11 @@ impl Workbench {
                             .text_color(rgb(if in_pc_group { INK } else { MUTED }))
                             .child(text),
                     )
-                    .on_click(
-                        cx.listener(move |this, _, window, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if this.image_current() {
                             this.reveal_line(line, 1, window, cx)
-                        }),
-                    )
+                        }
+                    }))
                     .into_any_element()
             }
             MachineRow::Instruction { index, .. } => {
@@ -504,7 +543,7 @@ impl Workbench {
             .and_then(|f| f.location.as_ref())
             .filter(|l| l.user)
             .map(|l| l.line as usize);
-        if let Some(line) = line {
+        if let Some(line) = line.filter(|_| self.image_current()) {
             self.editor.update(cx, |state, cx| {
                 state.set_cursor_position(
                     gpui_kit::component::input::Position::new(line.saturating_sub(1) as u32, 0),

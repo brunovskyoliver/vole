@@ -1,0 +1,19 @@
+cargo test --workspace --locked (Linux x64, clang/ld.lld 14.0.6), 2026-10-03
+vole unittests src/main.rs: 9 passed, 0 failed, 0 ignored
+vole_c unittests src/lib.rs: 10 passed, 0 failed, 0 ignored
+compile tests/compile.rs: 12 passed, 0 failed, 0 ignored
+register_aliases tests/register_aliases.rs: 5 passed, 0 failed, 0 ignored
+vole_debug unittests src/lib.rs: 2 passed, 0 failed, 0 ignored
+synthetic tests/synthetic.rs: 11 passed, 0 failed, 0 ignored
+compiler_corpus tests/compiler_corpus.rs: 1 passed, 0 failed, 0 ignored
+compiler_fixtures tests/compiler_fixtures.rs: 31 passed, 0 failed, 0 ignored
+scalar tests/scalar.rs: 24 passed, 0 failed, 0 ignored
+throughput tests/throughput.rs: 0 passed, 0 failed, 1 ignored
+acceptance tests/acceptance.rs: 15 passed, 0 failed, 0 ignored
+vole_project unittests src/lib.rs: 11 passed, 0 failed, 0 ignored
+c_debugging tests/c_debugging.rs: 22 passed, 0 failed, 0 ignored
+crafted_inputs tests/crafted_inputs.rs: 3 passed, 0 failed, 0 ignored
+debugger tests/debugger.rs: 11 passed, 0 failed, 0 ignored
+review_cases tests/review_cases.rs: 11 passed, 0 failed, 0 ignored
+source_debugging tests/source_debugging.rs: 11 passed, 0 failed, 0 ignored
+Total: 189 passed, 0 failed, 1 ignored (throughput benchmark)
