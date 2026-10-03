@@ -622,3 +622,27 @@ fn struct_copies_run_on_every_target() {
         }
     }
 }
+
+/// With an empty .data, LLD drops that output section; .bss must still be
+/// placed in the data region.
+#[test]
+fn zero_initialized_globals_alone_build_and_run() {
+    if !toolchain() {
+        return;
+    }
+    let source = "int total = 0;\nint values[4];\nint main(void) { total = 1; values[3] = 2; return total + values[3]; }\n";
+    for architecture in TARGETS {
+        for optimization in [Optimization::O0, Optimization::O1] {
+            let program = vole_c::compile(architecture, source, &settings(optimization))
+                .unwrap_or_else(|errors| panic!("{architecture:?}: {errors:?}"));
+            let debug = program.debug.as_ref().unwrap();
+            let total = debug.globals.iter().find(|g| g.name == "total").unwrap();
+            assert!(
+                matches!(total.location, vole_core::debug::Location::Address(a) if (0xA000..0x10000).contains(&a)),
+                "{architecture:?}: {:?}",
+                total.location
+            );
+            run(&program, 10_000).unwrap();
+        }
+    }
+}

@@ -8,10 +8,10 @@ PROFILE ?= debug
 help:
 	@printf '%s\n' \
 	  'mac-setup  Install dependencies, pinned Rust and missing Xcode Metal tools' \
-	  'mac-check  Check Xcode, Metal, Rust and guest assembler tools' \
+	  'mac-check  Check Xcode, Metal, Rust, guest assembler tools and Clang' \
 	  'mac-build  Build target/macos/$(PROFILE)/Vole.app' \
 	  'mac-run    Build and launch a new Vole.app instance' \
-	  'mac-verify Run Rust checks and all five guest round trips' \
+	  'mac-verify Run Rust checks, all five guest round trips and C on four targets' \
 	  'test-macos-script  Test build orchestration on any host' \
 	  '' 'Use PROFILE=release for an optimized build.'
 

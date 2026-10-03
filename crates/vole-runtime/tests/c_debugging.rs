@@ -4,7 +4,7 @@
 //! compiler does not yet produce line tables, so they can land before the
 //! compiler. Any other build failure is a test failure.
 use vole_core::{
-    Architecture, CompilerSettings, SourceLanguage,
+    Architecture, CompilerSettings, Optimization, SourceLanguage,
     debug::{DebugView, ValueText, VariableView},
 };
 use vole_runtime::{Command, RunState, Session, SourceStep};
@@ -344,3 +344,102 @@ target_tests!(arm64, Architecture::Arm64);
 target_tests!(x64, Architecture::X64);
 target_tests!(arm32, Architecture::Arm32);
 target_tests!(x86, Architecture::X86);
+
+/// `changed` compares with the previous stop, even after the same stop is
+/// refreshed again (e.g. by toggling a breakpoint while paused).
+#[test]
+fn changed_values_survive_repeated_refreshes() {
+    for architecture in [Architecture::Arm64, Architecture::X64] {
+        let Some(mut session) = compiled(architecture) else {
+            return;
+        };
+        session
+            .apply(Command::ToggleSourceBreakpoint(LOOP_BODY))
+            .unwrap();
+        run(&mut session);
+        run(&mut session);
+        let sum = named(&debug(&session).frames[0].variables, "sum");
+        assert!(sum.changed, "{architecture:?}: sum changed between stops");
+        session
+            .apply(Command::ToggleSourceBreakpoint(PRINT))
+            .unwrap();
+        let sum = named(&debug(&session).frames[0].variables, "sum");
+        assert!(sum.changed, "{architecture:?}: refresh kept the comparison");
+        let storage = sum.storage.as_ref().expect("frame storage");
+        assert!(
+            matches!(storage, vole_core::debug::Storage::RegisterOffset { .. }),
+            "{architecture:?}: {storage:?}"
+        );
+        let numbers = named(&debug(&session).globals, "numbers");
+        assert_eq!(numbers.storage, Some(vole_core::debug::Storage::Static));
+    }
+}
+
+const RECURSIVE: &str = r#"int fact(int n) {
+    if (n <= 1)
+        return 1;
+    return n * fact(n - 1);
+}
+int main(void) {
+    int r = fact(5);
+    return r;
+}
+"#;
+
+/// Optimized code has call-frame information that is only precise at call
+/// sites. Stepping follows executed calls and returns instead, so recursion
+/// and leaf functions behave the same at -O1 as at -O0.
+#[test]
+fn optimized_recursion_steps_one_frame_at_a_time() {
+    for architecture in [
+        Architecture::Arm64,
+        Architecture::X64,
+        Architecture::Arm32,
+        Architecture::X86,
+    ] {
+        if vole_c::clang_status().is_err() {
+            return;
+        }
+        for optimization in [Optimization::O0, Optimization::O1] {
+            let settings = CompilerSettings {
+                optimization,
+                warnings: true,
+            };
+            let mut session = Session::new(architecture, String::new());
+            session
+                .build(architecture, SourceLanguage::C, RECURSIVE.into(), settings)
+                .unwrap();
+            let label = format!("{architecture:?} {optimization:?}");
+            step(&mut session, SourceStep::Into);
+            assert_eq!(line(&session), 7, "{label}: first line of main");
+            step(&mut session, SourceStep::Over);
+            assert_eq!(stack(&session)[0].0, "main", "{label}: Over stays in main");
+            assert_eq!(line(&session), 8, "{label}");
+
+            session.apply(Command::Reset).unwrap();
+            session.apply(Command::ToggleSourceBreakpoint(4)).unwrap();
+            // Line 4 stops once per level; continue until four calls deep.
+            for _ in 0..8 {
+                run(&mut session);
+                if stack(&session).len() >= 5 {
+                    break;
+                }
+            }
+            let depth = stack(&session).len();
+            assert!(depth >= 5, "{label}: deep call {:?}", stack(&session));
+            step(&mut session, SourceStep::Out);
+            let after = stack(&session);
+            assert_eq!(
+                after.len(),
+                depth - 1,
+                "{label}: Out leaves one frame {after:?}"
+            );
+            assert_eq!(after[0].0, "fact", "{label}");
+            step(&mut session, SourceStep::Over);
+            assert!(
+                stack(&session).len() < depth,
+                "{label}: Over never descends"
+            );
+        }
+    }
+}

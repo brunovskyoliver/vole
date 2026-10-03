@@ -1,0 +1,94 @@
+{
+  "platform": "linux-x11 (Xvfb 1800x1200, Openbox, Mesa llvmpipe)",
+  "date": "2026-10-03",
+  "binary": "target/debug/vole (development build of this commit's sources)",
+  "toolchain": "clang 14.0.6, ld.lld 14.0.6 (Debian)",
+  "keyboard_delivery": "XTest via xdotool after activating the owned window; Shift-modified keys sent one at a time (rapid repeated Shift+F10 in a single xdotool call delivered only one press; spaced presses all arrived)",
+  "observations": [
+    {
+      "target": "x64",
+      "action": "Launch --language c",
+      "expected": "Compiled, paused in _start with explanation",
+      "observed": "Ready in _start; call stack note explains Step Into stops at main",
+      "screenshot": "screenshots/c-x64-ready.png"
+    },
+    {
+      "target": "x64",
+      "action": "F11 then F10 x3",
+      "expected": "main line 34, then 35, 37, 38",
+      "observed": "Paused at line 38 in main; output 'Vole C tour'; total/mask reported as declared later and not reached",
+      "screenshot": "screenshots/c-x64-step-over.png"
+    },
+    {
+      "target": "x64",
+      "action": "Click line 30, F9, F5",
+      "expected": "Stop inside swap at line 30 with main as caller",
+      "observed": "Call stack swap line 30 / main line 41; a, b pointers and temporary=7 with [rbp-N] chips",
+      "screenshot": "screenshots/c-x64-breakpoint-in-swap.png"
+    },
+    {
+      "target": "x64",
+      "action": "Shift+F11",
+      "expected": "Return to main after the swap call",
+      "observed": "Paused at line 42; x=3, y=7, y marked changed",
+      "screenshot": "screenshots/c-x64-step-out.png"
+    },
+    {
+      "target": "x64",
+      "action": "Back button, then Shift+F10 x4 spaced",
+      "expected": "Instruction count decreases by one per press",
+      "observed": "4260 -> 4257 (button + earlier presses) -> 4256 -> 4255 -> 4252; PC moves back into swap line 30/29",
+      "screenshot": null
+    },
+    {
+      "target": "arm64",
+      "action": "--visual-demo-c (source steps)",
+      "expected": "Paused inside sum with grouped machine code and variables",
+      "observed": "Line rail on PC group, values/count/total/i with [sp+N] chips, globals with full values",
+      "screenshot": "screenshots/c-arm64-paused-in-sum.png"
+    },
+    {
+      "target": "arm64 -O1",
+      "action": "F9 on line 14, F5 twice",
+      "expected": "Recursive factorial stop with optimized locations",
+      "observed": "n=2 shown in register x19 chip; call stack factorial line 14 / main line 48",
+      "screenshot": "screenshots/c-arm64-o1-paused.png"
+    },
+    {
+      "target": "arm32",
+      "action": "--visual-demo-c at 1280x800",
+      "expected": "Laptop layout fits one toolbar row",
+      "observed": "All panes visible; [r13+N] chips; 32-bit registers",
+      "screenshot": "screenshots/c-arm32-1280.png"
+    },
+    {
+      "target": "x86",
+      "action": "--visual-demo-c at 720x520, Variables tab",
+      "expected": "Compact tabbed layout",
+      "observed": "Two-row toolbar, call stack and variables readable; i marked changed",
+      "screenshot": "screenshots/c-x86-compact-variables.png"
+    },
+    {
+      "target": "arm64",
+      "action": "Open a .c file using double and malloc",
+      "expected": "Unsupported feature reported before Clang with hint",
+      "observed": "Line 4, column 5 floating-point error with teaching hint; line highlighted",
+      "screenshot": "screenshots/c-diagnostics.png"
+    },
+    {
+      "target": "x64",
+      "action": "Open a version 2 project with source breakpoint 21, F5",
+      "expected": "C mode, -O0, breakpoint restored and hit",
+      "observed": "Paused at line 21 in sum after reopening",
+      "screenshot": "screenshots/c-x64-project-reopened.png"
+    },
+    {
+      "target": "arm64",
+      "action": "Launch assembly mode",
+      "expected": "Assembly workbench unchanged",
+      "observed": "Assemble/Run/Step/Reverse toolbar, instructions, registers, trace as before",
+      "screenshot": "screenshots/asm-arm64-after-c.png"
+    }
+  ],
+  "limits": "Virtual X11 display. macOS, Windows, Wayland, physical GPUs and native file dialogs for C projects need separate native acceptance."
+}

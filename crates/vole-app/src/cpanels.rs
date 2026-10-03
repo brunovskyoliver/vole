@@ -537,7 +537,6 @@ impl Workbench {
             for variable in &frame.variables {
                 self.variable_rows(
                     variable,
-                    Some(frame),
                     format!("{}:{}", frame.function, variable.name),
                     0,
                     &mut rows,
@@ -560,7 +559,6 @@ impl Workbench {
             for variable in globals {
                 self.variable_rows(
                     variable,
-                    None,
                     format!("global:{}", variable.name),
                     0,
                     &mut rows,
@@ -603,7 +601,6 @@ impl Workbench {
     fn variable_rows(
         &self,
         variable: &VariableView,
-        frame: Option<&FrameView>,
         key: String,
         depth: usize,
         rows: &mut Vec<AnyElement>,
@@ -611,11 +608,7 @@ impl Workbench {
     ) {
         let expandable = !variable.children.is_empty();
         let expanded = expandable && self.expanded.contains(&key);
-        let chip = cmodel::location_chip(
-            variable,
-            frame,
-            self.view.program.as_ref().and_then(|p| p.debug.as_ref()),
-        );
+        let chip = cmodel::location_chip(variable);
         let (value, unavailable) = match &variable.value {
             ValueText::Value(text) => (text.clone(), false),
             ValueText::Unavailable(reason) => (cmodel::unavailable_text(reason), true),
@@ -704,34 +697,25 @@ impl Workbench {
             .child(disclosure)
             .child(name)
             .child(type_name);
-        let row = if unavailable {
-            row.child(line.children(chip_element))
-                .child(div().pl(px(28.)).child(value_element.text_size(px(12.))))
+        // Short values share the name line; long values and reasons get their
+        // own wrapped line so pointers, strings and arrays stay readable.
+        let row = if unavailable || value.chars().count() > 14 {
+            row.child(line.children(chip_element)).child(
+                div()
+                    .pl(px(28.))
+                    .min_w_0()
+                    .child(value_element.text_size(px(12. * self.zoom))),
+            )
         } else {
             row.child(
-                line.child(
-                    value_element
-                        .flex_shrink(1.)
-                        .min_w_0()
-                        .max_w(px(170.))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis(),
-                )
-                .children(chip_element),
+                line.child(value_element.flex_none().whitespace_nowrap())
+                    .children(chip_element),
             )
         };
         rows.push(row.into_any_element());
         if expanded {
             for child in &variable.children {
-                self.variable_rows(
-                    child,
-                    frame,
-                    format!("{key}/{}", child.name),
-                    depth + 1,
-                    rows,
-                    cx,
-                );
+                self.variable_rows(child, format!("{key}/{}", child.name), depth + 1, rows, cx);
             }
         }
     }

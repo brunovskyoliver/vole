@@ -93,12 +93,21 @@ pub(crate) fn clang(output: &str, source: &str) -> Vec<Diagnostic> {
         };
         let diagnostic = if located.file == "main.c" {
             include_line = 1;
-            Diagnostic::at(
+            let diagnostic = Diagnostic::at(
                 located.line,
                 character_column(source, located.line, located.column),
                 located.severity,
                 located.message,
-            )
+            );
+            match implicit_function(located.message) {
+                Some(name) => diagnostic.with_hint(format!(
+                    "Declare or define {name} before calling it. Vole C programs are \
+                     freestanding: the runtime has no heap (malloc), no input (scanf, getchar) \
+                     and no files (fopen). Include <vole.h> for the runtime functions: \
+                     {RUNTIME_FUNCTIONS}."
+                )),
+                None => diagnostic,
+            }
         } else {
             // Positions inside headers point at the #include line of the document.
             let header = file_name(located.file);
@@ -135,6 +144,14 @@ pub(crate) fn clang(output: &str, source: &str) -> Vec<Diagnostic> {
         }
     }
     result
+}
+
+/// The function named by Clang's implicit-declaration error, if this is one.
+fn implicit_function(message: &str) -> Option<&str> {
+    let rest = message
+        .strip_prefix("implicit declaration of function '")
+        .or_else(|| message.strip_prefix("call to undeclared function '"))?;
+    rest.split_once('\'').map(|(name, _)| name)
 }
 
 /// Finds the first use of `identifier` in the document as a whole word, skipping
@@ -323,6 +340,16 @@ mod tests {
         let diagnostics = clang(output, "");
         assert_eq!(diagnostics[0].line, 3);
         assert!(diagnostics[0].hint.is_some());
+    }
+
+    #[test]
+    fn undeclared_library_calls_explain_the_runtime() {
+        let diagnostics = clang(
+            "main.c:6:20: error: implicit declaration of function 'malloc' is invalid in C99 [-Werror,-Wimplicit-function-declaration]\n",
+            "",
+        );
+        let hint = diagnostics[0].hint.as_deref().unwrap();
+        assert!(hint.contains("Declare or define malloc") && hint.contains("no heap"));
     }
 
     #[test]

@@ -51,7 +51,8 @@ SECTIONS {
   ASSERT(SIZEOF(.text) <= 0x7000, \"VOLE_CODE_TOO_LARGE\")
   .rodata 0x8000 : { *(.rodata .rodata.*) *(.data.rel.ro .data.rel.ro.*) }
   ASSERT(SIZEOF(.rodata) <= 0x2000, \"VOLE_RODATA_TOO_LARGE\")
-  .data 0xA000 : { *(.data .data.*) }
+  . = 0xA000;
+  .data : { *(.data .data.*) }
   .bss : { *(.bss .bss.*) *(COMMON) }
   ASSERT(. <= 0x10000, \"VOLE_DATA_TOO_LARGE\")
   /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.ARM.exidx*) *(.ARM.extab*) }

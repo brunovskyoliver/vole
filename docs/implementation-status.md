@@ -1,10 +1,40 @@
 # Implementation status
 
 The approved assembler and simulator are implemented as a Rust workspace with
-a native GPUI desktop and a headless verification CLI. Higher-level language
-compilation remains a later release. VOLE implements the complete supplied
-instruction table. ARM32, ARM64, x86 and x64 execute actual bytes using the
-[documented scalar instruction subsets](isa-support.md).
+a native GPUI desktop and a headless verification CLI. VOLE implements the
+complete supplied instruction table. ARM32, ARM64, x86 and x64 execute actual
+bytes using the [documented scalar instruction subsets](isa-support.md), and
+run [freestanding C compiled with Clang](c-environment.md) with source-level
+debugging.
+
+## C compilation and source debugging
+
+`vole-c` compiles one C document with Clang for `aarch64-none-elf`,
+`x86_64-none-elf`, `armv7a-none-eabi` or `i386-none-elf`, links it with
+startup code and a small teaching runtime using LLD and a fixed memory map,
+and converts DWARF 5 line, variable, type and call-frame information into a
+saved debug model with gimli. Unsupported features (floating point, inline
+assembly, host includes and similar) are reported before Clang runs, with
+explanations; Clang and LLD errors are mapped to document lines and columns.
+Compilation is bounded and runs on the runtime worker thread.
+
+The interpreters were extended to every instruction Clang 14 emits for that
+scope at `-O0` and `-O1`, and decoding was cached, making stepping 20–45 times
+faster. Faults remain atomic, writes to code and constant data fault, and
+reverse execution covers every new instruction.
+
+`vole-debug` unwinds frames with the saved CFI, evaluates variable locations,
+formats values by type and explains unavailable values. The runtime adds
+source-line breakpoints and bounded, pausable Step Into, Step Over and Step
+Out. The workbench adds a C mode: editor, machine code grouped by C line with
+bytes, call stack, variables with location chips linked to memory, registers,
+output, clickable diagnostics and C syntax highlighting, in wide and compact
+layouts. C projects (version 2) save source, target, compiler settings,
+source breakpoints, the image with its debug model and machine state;
+version 1 assembly projects still open and assembly projects are still
+written as version 1. `vole-cli` compiles and debugs C from the command
+line. Toolchain builds, packages, macOS bundles and CI include Clang and its
+resource headers.
 
 ## Delivered behavior
 
@@ -47,7 +77,8 @@ the patch.
 
 ## Host acceptance
 
-The final locked workspace passes 74 tests, strict Clippy and formatting.
+The C release adds the tests listed in [verification evidence](verification/README.md#c-compilation-and-source-debugging).
+The previous assembler release passed 74 tests, strict Clippy and formatting.
 See [verification evidence](verification/README.md) for test output, native
 screenshots, interaction observations and the separate review axes.
 
@@ -66,8 +97,17 @@ the [native acceptance checks](native-verification.md). Windows DPI scaling,
 native controls and install/launch/save/reopen also need host verification.
 Linux ARM64 and Windows ARM64 host packages are not part of this first matrix.
 
+For C, the native checks performed are Linux x64 only: the GPUI workbench in
+C mode on all four guest targets under X11/Xvfb, and the CLI and engine
+verification with the host's Clang/LLD 14.0.6. Clang inside the pinned LLVM
+18.1.8 toolchain build, the bundled resource headers, Homebrew Clang in the
+macOS bundle and Clang on Windows are wired into the scripts and CI but have
+**not** been run in this environment; CI will exercise them on its macOS and
+Windows runners. Guest behavior itself is host-independent and covered by the
+fixture and corpus tests.
+
 The repository is published at [brunovskyoliver/vole](https://github.com/brunovskyoliver/vole).
 [Makefile commands](macos-development.md) build and launch a local macOS app
 bundle. Signing and notarization remain owner-controlled release steps.
-Full ISA support, privileged/OS execution,
-SIMD, cycle timing and higher-level compilation are outside this release.
+Full ISA support, privileged/OS execution, SIMD, floating point, cycle
+timing, a C heap or input, and languages other than C are outside this release.

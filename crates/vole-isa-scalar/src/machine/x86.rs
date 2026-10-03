@@ -253,8 +253,14 @@ impl ScalarMachine {
                 ((dividend << (128 - u32::from(double))) as i128) >> (128 - u32::from(double))
             };
             let divisor = i128::from(Self::signed(source, bits));
-            let quotient = dividend / divisor;
-            let remainder = dividend % divisor;
+            // i128::MIN / -1 cannot be represented on the host; it is #DE on x86.
+            let (Some(quotient), Some(remainder)) =
+                (dividend.checked_div(divisor), dividend.checked_rem(divisor))
+            else {
+                return Err(
+                    self.divide_error(&format!("signed quotient does not fit in {bits} bits"))
+                );
+            };
             let limit = 1_i128 << (bits - 1);
             if quotient < -limit || quotient >= limit {
                 return Err(

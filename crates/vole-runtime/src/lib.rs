@@ -191,23 +191,92 @@ pub struct Session {
     stale: bool,
     /// Replace the halt message with the C exit status at the next refresh.
     announce_exit: bool,
+    /// Machine position (steps, PC) of the current paused debug view and the
+    /// view from the previous distinct stop, which `changed` compares against.
+    /// Refreshing the same stop again must not compare a view with itself.
+    debug_stop: Option<(u64, u64)>,
+    debug_baseline: Option<DebugView>,
 }
 
 /// Bookkeeping for a source step in progress.
+///
+/// Frames are tracked from the executed calls and returns rather than from
+/// call-frame information: Clang's CFI is only precise at call sites (not in
+/// shrink-wrapped prologues or epilogues at -O1), while every call and return
+/// is visible in the step records.
 struct SourceGoal {
     kind: SourceStep,
     /// (file, line) of the user row containing the starting PC.
     start_line: Option<(u32, u32)>,
-    start_cfa: Option<u64>,
-    /// Step Out: the return address and the CFA of the frame being left.
-    out: Option<(u64, u64)>,
-    /// Register-only shadow updated from step records, so CFA checks never
+    /// Function containing the starting PC.
+    start_function: Option<u64>,
+    /// Calls made since the step began: (return address, SP before the call).
+    calls: Vec<(u64, u64)>,
+    /// Set once the starting frame returned to its caller.
+    returned: bool,
+    /// True when the last instruction returned from a call.
+    just_returned: bool,
+    /// Addresses directly after a call instruction.
+    return_sites: BTreeSet<u64>,
+    /// Register-only shadow updated from step records, so stack checks never
     /// need a full machine snapshot.
     registers: Snapshot,
 }
 
+/// Whether a decoded instruction is a call (it writes a return address).
+fn is_call(architecture: Architecture, mnemonic: &str) -> bool {
+    const CONDITIONS: [&str; 15] = [
+        "eq", "ne", "cs", "hs", "cc", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt",
+    ];
+    let condition =
+        |rest: &str| rest.is_empty() || rest == "le" || rest == "al" || CONDITIONS.contains(&rest);
+    match architecture {
+        Architecture::Arm64 => matches!(mnemonic, "bl" | "blr"),
+        // `bls`/`blt`/`ble`/`blo` are conditional branches, not calls.
+        Architecture::Arm32 => mnemonic
+            .strip_prefix("blx")
+            .or_else(|| mnemonic.strip_prefix("bl"))
+            .is_some_and(condition),
+        Architecture::X86 | Architecture::X64 => mnemonic.starts_with("call"),
+        Architecture::Vole => false,
+    }
+}
+
+/// Whether a decoded instruction is a function return (as opposed to a
+/// jump-table or other indirect branch).
+fn is_return(architecture: Architecture, assembly: &str) -> bool {
+    let (mnemonic, operands) = assembly.split_once(' ').unwrap_or((assembly, ""));
+    let operands = operands.replace(' ', "");
+    match architecture {
+        Architecture::Arm64 => mnemonic == "ret",
+        Architecture::Arm32 => {
+            let lists_pc = |list: &str| {
+                list.split_once('{').is_some_and(|(_, registers)| {
+                    registers
+                        .trim_end_matches('}')
+                        .split(',')
+                        .any(|register| register == "pc")
+                })
+            };
+            (mnemonic.starts_with("bx") && (operands == "lr" || operands == "r14"))
+                || ((mnemonic.starts_with("pop") || mnemonic.starts_with("ldm"))
+                    && lists_pc(&operands))
+                || (mnemonic.starts_with("mov") && (operands == "pc,lr" || operands == "pc,r14"))
+        }
+        Architecture::X86 | Architecture::X64 => mnemonic.starts_with("ret"),
+        Architecture::Vole => false,
+    }
+}
+
 impl SourceGoal {
+    fn sp(&self) -> u64 {
+        self.registers
+            .register(stack_register(self.registers.architecture))
+            .unwrap_or(0)
+    }
+
     fn observe(&mut self, record: &StepRecord) {
+        let sp_before = self.sp();
         for change in &record.registers {
             if let Some(register) = self
                 .registers
@@ -228,17 +297,54 @@ impl SourceGoal {
         {
             register.value = record.pc_after;
         }
+        self.just_returned = false;
+        let sequential = record
+            .pc_before
+            .wrapping_add(record.instruction.bytes.len() as u64);
+        if record.pc_after == sequential {
+            return;
+        }
+        let mnemonic = record
+            .instruction
+            .assembly
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if is_call(self.registers.architecture, mnemonic) {
+            self.calls.push((sequential, sp_before));
+            return;
+        }
+        let sp = self.sp();
+        // A return lands on the call's return address with the caller's SP.
+        if let Some(index) = self
+            .calls
+            .iter()
+            .rposition(|(address, stack)| *address == record.pc_after && *stack == sp)
+        {
+            self.calls.truncate(index);
+            self.just_returned = true;
+        } else if self.calls.is_empty()
+            && is_return(self.registers.architecture, &record.instruction.assembly)
+            && self.return_sites.contains(&record.pc_after)
+        {
+            self.returned = true;
+            self.just_returned = true;
+        }
     }
 
     /// Whether the step is complete after `record`, per the source debugging contract.
-    fn reached(&self, debug: &vole_core::DebugInfo, record: &StepRecord) -> bool {
+    fn reached(&mut self, debug: &vole_core::DebugInfo, record: &StepRecord) -> bool {
         let pc = record.pc_after;
-        if let Some((return_address, cfa)) = self.out {
-            return pc == return_address
-                && self
-                    .registers
-                    .register(stack_register(self.registers.architecture))
-                    .is_some_and(|sp| sp >= cfa);
+        if self.kind == SourceStep::Out {
+            if !self.returned {
+                return false;
+            }
+            if debug.function_at(pc).is_some_and(|function| function.user) {
+                return true;
+            }
+            // Returned into runtime code: keep going until user code.
+            self.returned = false;
+            return false;
         }
         let Some(row) = vole_debug::statement_start(debug, pc) else {
             return false;
@@ -252,15 +358,17 @@ impl SourceGoal {
         {
             return false;
         }
-        let cfa = vole_debug::current_cfa(debug, &self.registers);
-        if self.kind == SourceStep::Over
-            && let (Some(current), Some(start)) = (cfa, self.start_cfa)
-            && current < start
-        {
-            return false;
+        let in_callee = !self.calls.is_empty();
+        if self.kind == SourceStep::Over {
+            // Calls run to completion; a tail call into another function
+            // continues until control is back in this function or its caller.
+            let same_function = debug.function_at(pc).map(|f| f.low_pc) == self.start_function;
+            if in_callee || !(same_function || self.returned) {
+                return false;
+            }
         }
-        let backward = record.pc_after <= record.pc_before;
-        Some((row.file, row.line)) != self.start_line || cfa != self.start_cfa || backward
+        let backward = record.pc_after <= record.pc_before && !self.just_returned;
+        Some((row.file, row.line)) != self.start_line || in_callee || self.returned || backward
     }
 }
 
@@ -309,6 +417,8 @@ impl Session {
             pc: 0,
             stale: false,
             announce_exit: false,
+            debug_stop: None,
+            debug_baseline: None,
         }
     }
 
@@ -450,6 +560,8 @@ impl Session {
         self.view.language = program.language;
         self.view.program = Some(program);
         self.view.debug = None;
+        self.debug_stop = None;
+        self.debug_baseline = None;
         self.view.stepping = None;
         self.goal = None;
         self.view.state = RunState::Ready;
@@ -527,36 +639,17 @@ impl Session {
         let start_line = vole_debug::line_at(debug, snapshot.pc)
             .filter(|row| row.line != 0 && debug.is_user_file(row.file))
             .map(|row| (row.file, row.line));
-        let start_cfa = vole_debug::current_cfa(debug, snapshot);
-        let out = if kind == SourceStep::Out {
-            let frames = vole_debug::backtrace(debug, architecture, snapshot);
-            let is_user = |frame: &vole_debug::UnwoundFrame| {
-                debug
-                    .function_at(frame.lookup_pc)
-                    .is_some_and(|function| function.user)
-            };
-            // From runtime code, return to the innermost user frame instead.
-            let leave = match frames.iter().position(is_user) {
-                Some(0) | None => 0,
-                Some(user) => user - 1,
-            };
-            let frame = &frames[leave];
-            let return_address = frames.get(leave + 1).map(|caller| caller.pc).or_else(|| {
-                vole_debug::caller_frame(debug, architecture, snapshot, frame)
-                    .map(|caller| caller.pc)
-            });
-            match (return_address, frame.cfa) {
-                (Some(address), Some(cfa)) => Some((address, cfa)),
-                _ => {
-                    return Err(SimError(
-                        "Step Out needs call-frame information at this point; use Step or Run."
-                            .into(),
-                    ));
-                }
-            }
-        } else {
-            None
-        };
+        let registers = register_shadow(snapshot);
+        let start_function = debug.function_at(snapshot.pc).map(|f| f.low_pc);
+        let return_sites = program
+            .instructions
+            .iter()
+            .filter(|instruction| {
+                let mnemonic = instruction.assembly.split_whitespace().next().unwrap_or("");
+                is_call(architecture, mnemonic)
+            })
+            .map(|instruction| instruction.address + instruction.bytes.len() as u64)
+            .collect();
         // Without a user line there is nothing to step over: from startup code
         // `main` itself is a callee. Step Over then behaves like Step Into.
         let effective = if kind == SourceStep::Over && start_line.is_none() {
@@ -567,9 +660,12 @@ impl Session {
         self.goal = Some(SourceGoal {
             kind: effective,
             start_line,
-            start_cfa,
-            out,
-            registers: register_shadow(snapshot),
+            start_function,
+            calls: Vec::new(),
+            returned: false,
+            just_returned: false,
+            return_sites,
+            registers,
         });
         // Leaving a breakpoint location must not stop on that same breakpoint.
         self.bypass_breakpoint = Some(snapshot.pc);
@@ -945,12 +1041,11 @@ impl Session {
                     .program
                     .as_ref()
                     .and_then(|program| program.debug.as_ref());
-                if debug.is_some_and(|debug| goal.reached(debug, &record)) {
-                    let line = debug
-                        .and_then(|debug| {
-                            vole_debug::line_at(debug, record.pc_after)
-                                .filter(|row| debug.is_user_file(row.file))
-                        })
+                if let Some(debug) = debug
+                    && goal.reached(debug, &record)
+                {
+                    let line = vole_debug::line_at(debug, record.pc_after)
+                        .filter(|row| debug.is_user_file(row.file))
                         .map(|row| row.line);
                     self.view.state = RunState::Paused;
                     self.view.message = match line {
@@ -968,6 +1063,11 @@ impl Session {
             if started.elapsed() >= Duration::from_millis(8) {
                 break;
             }
+        }
+        // A stop before any instruction in this batch (e.g. a breakpoint at
+        // the batch boundary) still needs a fresh paused view.
+        if self.view.state != RunState::Running {
+            self.stale = true;
         }
         if self.view.state == RunState::Running
             && self.goal.is_none()
@@ -1082,10 +1182,14 @@ impl Session {
                 instruction
             });
             if self.view.state != RunState::Running {
-                // Paused observations only; `changed` compares with the last one.
-                let previous = self.view.debug.take();
+                // Paused observations only; `changed` compares with the previous stop.
+                let stop = (snapshot.steps, snapshot.pc);
+                if self.debug_stop != Some(stop) {
+                    self.debug_baseline = self.view.debug.take();
+                    self.debug_stop = Some(stop);
+                }
                 self.view.debug = self.view.program.as_ref().and_then(|program| {
-                    vole_debug::debug_view(program, &snapshot, previous.as_ref())
+                    vole_debug::debug_view(program, &snapshot, self.debug_baseline.as_ref())
                 });
                 self.goal = None;
                 self.view.stepping = None;

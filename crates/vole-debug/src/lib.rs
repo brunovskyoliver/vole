@@ -204,6 +204,56 @@ pub fn validate(debug: &DebugInfo) -> Result<(), String> {
             return Err(format!("Type {} refers to an unknown type.", ty.name));
         }
     }
+    type_cycle(debug)
+}
+
+/// Types may refer to themselves only through pointers (`struct node *next`).
+/// Any cycle through arrays, members, typedefs or qualifiers has no size.
+fn type_cycle(debug: &DebugInfo) -> Result<(), String> {
+    use vole_core::debug::TypeKind;
+    let edges = |id: usize| -> Vec<usize> {
+        match &debug.types[id].kind {
+            TypeKind::Typedef(t) | TypeKind::Const(t) | TypeKind::Volatile(t) => {
+                t.iter().copied().collect()
+            }
+            TypeKind::Array { element, .. } => element.iter().copied().collect(),
+            TypeKind::Struct(members) | TypeKind::Union(members) => {
+                members.iter().filter_map(|m| m.type_id).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    // 0 = unvisited, 1 = on the current path, 2 = finished.
+    let mut state = vec![0_u8; debug.types.len()];
+    for root in 0..debug.types.len() {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack = vec![(root, edges(root), 0_usize)];
+        state[root] = 1;
+        while let Some((node, children, next)) = stack.last_mut() {
+            if let Some(&child) = children.get(*next) {
+                *next += 1;
+                match state[child] {
+                    0 => {
+                        state[child] = 1;
+                        let grandchildren = edges(child);
+                        stack.push((child, grandchildren, 0));
+                    }
+                    1 => {
+                        return Err(format!(
+                            "Type {} contains itself without a pointer.",
+                            debug.types[child].name
+                        ));
+                    }
+                    _ => {}
+                }
+            } else {
+                state[*node] = 2;
+                stack.pop();
+            }
+        }
+    }
     Ok(())
 }
 
@@ -267,6 +317,7 @@ pub fn debug_view(
         debug,
         architecture,
         target,
+        budget: std::cell::Cell::new(values::MAX_NODES),
     };
     let mut frames: Vec<FrameView> = unwound
         .iter()

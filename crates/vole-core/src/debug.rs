@@ -285,6 +285,17 @@ pub enum VariableKind {
     Member,
 }
 
+/// Where a variable lives, in the terms the compiler described it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Storage {
+    /// In memory at a register plus a signed offset, e.g. `[x29-4]`.
+    RegisterOffset { register: String, offset: i64 },
+    /// The value itself is in a register.
+    Register(String),
+    /// At a fixed address (globals and static locals).
+    Static,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VariableView {
     pub name: String,
@@ -298,6 +309,9 @@ pub struct VariableView {
     pub children: Vec<VariableView>,
     /// True when the value differs from the previous paused observation.
     pub changed: bool,
+    /// Storage at the frame's PC for top-level variables; `None` for elements.
+    #[serde(default)]
+    pub storage: Option<Storage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

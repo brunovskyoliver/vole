@@ -47,11 +47,12 @@ def verify_c(binary, directory):
     source.write_text(C_PROGRAM)
     results = {}
     for architecture in ["arm64", "x64", "arm32", "x86"]:
-        snapshot = execute(binary, ["--arch", architecture, "--source", str(source), "--steps", "1000000", "--json"])
-        output = bytes(snapshot["output"]).decode()
-        if not snapshot["halted"] or output != C_OUTPUT:
-            raise AssertionError(f"{architecture}: C program printed {output!r}, expected {C_OUTPUT!r}")
-        results[architecture] = {"compiled_c": "pass", "instructions": snapshot["steps"], "output": output}
+        report = execute(binary, ["--arch", architecture, "--source", str(source), "--steps", "1000000", "--json"])
+        if report["state"] != "Halted" or report["exit_status"] != 0 or report["output"] != C_OUTPUT:
+            raise AssertionError(f"{architecture}: C program ended {report['state']} with status "
+                                 f"{report['exit_status']} and printed {report['output']!r}, expected {C_OUTPUT!r}")
+        results[architecture] = {"compiled_c": "pass", "instructions": report["steps"],
+                                 "output": report["output"], "exit_status": 0}
     return results
 
 

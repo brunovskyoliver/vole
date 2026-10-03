@@ -387,6 +387,17 @@ impl Workbench {
     }
 
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
+        // Execution replaces one-off notes so the status bar reports where it stopped.
+        if matches!(
+            command,
+            Command::Run
+                | Command::Step
+                | Command::SourceStep(_)
+                | Command::Reverse
+                | Command::Reset
+        ) {
+            self.breakpoint_note = None;
+        }
         if let Err(error) = self.runtime.send(command) {
             self.edit_error = Some(error.to_string());
         }

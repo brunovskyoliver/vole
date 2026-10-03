@@ -1,6 +1,8 @@
 # Guest architectures and teaching environment
 
 Vole assembles and simulates VOLE, ARM32, ARM64/AArch64, x86 and x64/x86-64.
+The four real targets also run freestanding C compiled with Clang; see
+[C and source-level debugging](c-environment.md) for that scope.
 Guest architecture is independent of the computer running the application.
 The real CPU targets execute a documented scalar teaching subset. They do not
 boot an operating system or execute arbitrary application binaries.
@@ -33,18 +35,19 @@ support for every encoding or operand form.
 | Target | Verified operations | Verified architecture details |
 | --- | --- | --- |
 | VOLE 8-bit | See [VOLE conventions](vole-spec.md) | Sixteen byte registers; 256-byte memory; supplied D/E/F extensions |
-| ARM32 A32 | MOV, conditional MOV, MOVS, ADD, ADDS, SUBS, CMP, ORR, B/conditional B, BL, BX, LDR literal, LDRB, STR, STRB, PUSH, POP, BKPT, SVC | 32-bit wrapping, conditional execution, PC + 8 operand reads, LR returns, stack register lists, byte/word accesses, immediate and register offsets, pre-index writeback, NZCV, shifter carry |
-| ARM64 A64 | MOV, ADD, ADDS, SUBS, CMP, LSL, ORR, B.NE, BL, RET, ADR, LDRB, LDRSB, STR, STRB, STP, LDP, BRK, SVC | W writes zero the upper X half, XZR discards writes and reads zero, SP, signed loads, post-index loads, stack pair pre/post indexing, NZCV and arithmetic overflow |
-| x86 IA-32 | MOV, ADD, SUB, SHL, LEA, CMP, DEC, JNE/JNZ, CALL, RET, PUSH, POP, INT3, INT 0x80 | 8/16/32-bit aliases, AH and AL writes, arithmetic/logic flags, variable instruction lengths, stack accesses, linked symbol addresses |
-| x64 x86-64 | x86 operations plus MOVABS, SYSCALL | 8/16-bit writes preserve other bits, EAX/R8D writes clear the upper half, 64-bit arithmetic, RIP-relative addressing, RCX/R11 syscall saves |
+| ARM32 A32 | MOV/MVN(S), MOVW/MOVT, ADD/ADC/SUB/SBC/RSB/RSC(S), CMP/CMN/TST/TEQ, AND/ORR/EOR/BIC(S), LSL/LSR/ASR/ROR/RRX(S), MUL(S)/MLA/MLS, UMULL/SMULL/UMLAL/SMLAL(S)/UMAAL, SMMUL(R)/SMMLA/SMMLS, SMULxy/SMLAxy, SDIV/UDIV, CLZ/REV/REV16/REVSH/RBIT, UXTB/UXTH/SXTB/SXTH (with rotation), UXTAB/UXTAH/SXTAB/SXTAH, UBFX/SBFX/BFI/BFC, LDR/LDRB/LDRH/LDRSB/LDRSH/LDRD, STR/STRB/STRH/STRD, LDM/STM (IA/IB/DA/DB), PUSH/POP, B/BL/BX/BLX (register), MRS APSR, MSR APSR_nzcvq, BKPT, SVC, NOP | Conditional execution of every instruction, PC + 8 reads, PC-writing data processing and loads (jump tables), shifter carry for immediate and register shifts (including counts of 32 or more), 64-bit carry chains, pre/post-index and negative register offsets, writeback, divide-by-zero returns 0, NZCV |
+| ARM64 A64 | MOV/MOVZ/MOVN/MOVK/MVN, ADD/ADDS/SUB/SUBS/ADC/SBC(S)/NEG(S)/NGC(S), CMP/CMN/TST/CCMP/CCMN, AND/ORR/EOR/BIC/ORN/EON(S), LSL/LSR/ASR/ROR (immediate and register), MUL/MNEG/MADD/MSUB, SMULL/UMULL/SMADDL/UMADDL/SMSUBL/UMSUBL/SMNEGL/UMNEGL, SMULH/UMULH, SDIV/UDIV, CSEL/CSINC/CSINV/CSNEG/CSET/CSETM/CINC/CINV/CNEG, UBFX/SBFX/UBFIZ/SBFIZ/BFI/BFXIL/BFC/UBFM/SBFM/BFM/EXTR, SXTB/SXTH/SXTW/UXTB/UXTH, REV/REV16/REV32/RBIT/CLZ/CLS, ADR/ADRP, LDR/LDUR{B,H,SB,SH,SW}, STR/STUR{B,H}, LDP/STP/LDPSW, B/B.cond/BL/BR/BLR/RET, CBZ/CBNZ/TBZ/TBNZ, BRK, SVC | W writes zero the upper half, XZR/WZR, SP, shifted and extended register operands, register-offset addressing with LSL/UXTW/SXTW, pre/post-index writeback, literal loads, division by zero gives 0 and MIN / −1 gives MIN, NZCV |
+| x86 IA-32 | MOV, MOVZX/MOVSX, LEA, XCHG, PUSH/POP (register, immediate, memory), LEAVE, ADD/ADC/SUB/SBB/CMP, AND/OR/XOR/TEST, INC/DEC/NEG/NOT, SHL/SHR/SAR/ROL/ROR, SHLD/SHRD, MUL/IMUL (one, two and three operands), DIV/IDIV, CBW/CWDE/CWD/CDQ, BSWAP, BT/BTS/BTR/BTC, BSF/BSR, SETcc, CMOVcc, Jcc/JMP/CALL (immediate, register, memory), RET (with immediate), LOOP, REP MOVS/STOS, STC/CLC/CMC/CLD, NOP (multi-byte), INT3, HLT, INT 0x80 | 8/16/32-bit aliases and AH–DH, CF/PF/AF/ZF/SF/OF for arithmetic, carry chains, negation, multiply and shifts, #DE divide errors fault atomically, repeated string operations run one element per step, jump tables through memory |
+| x64 x86-64 | x86 operations plus MOVABS, MOVSXD, CDQE, CQO, SYSCALL | 32-bit writes zero the upper half (including CMOVcc with a false condition), 8/16-bit writes preserve other bits, 128-bit dividends, RIP-relative addressing, RCX/R11 syscall saves |
 
-Additional implemented scalar handlers are available for exploration. These
-have less fixture coverage: AND/XOR/NOT/NEG; ARM BIC/EOR/ORN/EON and shifts;
-ARM byte/halfword/signed/unscaled loads; ARM64 CBZ/CBNZ/TBZ/TBNZ and MOVK;
-x86 MOVZX/MOVSX/MOVSXD, IMUL with two/three operands, TEST, INC, shifts,
-rotates, LOOP, conditional jumps, SETcc and CMOVcc. Check the decoded form and
-its resulting trace when using these. Each instruction is decoded by Capstone
-before the corresponding Rust handler executes.
+Instructions outside this table fault with an Unsupported message at their
+address. The subset covers every instruction Clang 14 emits for the
+[documented C scope](c-environment.md) at `-O0` and `-O1` on all four
+targets, which `crates/vole-isa-scalar/tests/compiler_corpus.rs` verifies by
+compiling and running a C corpus. Each instruction is decoded by Capstone
+before the corresponding Rust handler executes. Decoded instructions are
+cached per address while their bytes are unchanged, so self-modifying code
+still decodes the new bytes.
 
 Explanations describe decoded operations and observed state changes. An
 instruction without a specific explanation says so. Explanations are not
@@ -76,12 +79,19 @@ History retains at most 4096 instructions and approximately two MiB of deltas.
 Older entries expire. Machine edits clear history. Output is capped at one MiB.
 A saved snapshot restores the bounded guest state but clears old undo history.
 
+Writes to a read-only region (C code and constant data) fault before any
+state changes. ARM alignment checks and the ARM Q/GE flags are not modelled.
+Constrained-unpredictable encodings, such as writeback onto the value register
+or LDM with the base in the list, fault.
+
 Undefined x86 flags retain a deterministic prior value, except flags explicitly
 set by the supported instruction. Flat addressing excludes segment overrides,
 address-size overrides and virtual-memory/privilege control. ARM status-control
 instructions, exception-return forms that write PC and flags, SIMD, floating
-point, atomics and exclusive accesses are outside the scalar model. Repeated
-x86 string instructions fault promptly; they are not uninterruptible host loops.
+point, atomics and exclusive accesses are outside the scalar model. `REP MOVS`
+and `REP STOS` (emitted by Clang for struct copies) execute one element per
+step, as interruptible hardware does, so every element is reversible and
+budgeted; they are never host loops. `REPNE`, `CMPS`, `SCAS` and `LODS` fault.
 
 ## Teaching output and stop conventions
 
@@ -146,6 +156,15 @@ Run `cargo test -p vole-isa-scalar`. It checks all shipped scalar samples and
 independent first-instruction byte fixtures, arithmetic/flag results, aliases,
 branches, PC behavior, sparse mappings, atomic faults, self-modification,
 reversal, reset, saved snapshots, ELF symbols and bounded diagnostics.
+`tests/compiler_fixtures.rs` adds 30 tests with about 115 cases whose expected
+registers, flags and memory were computed by hand from the Arm and Intel
+manuals, including division by zero, `INT_MIN / -1`, 64-bit carries on 32-bit
+targets and conditional selects. Every case also reverses all of its steps
+and compares with the initial state, and atomic-fault cases cover pair,
+multiple and repeated stores into read-only memory, #DE and `xchg`.
+`tests/compiler_corpus.rs` compiles five C programs for all four targets at
+`-O0` and `-O1` and compares about 2.4 million executed instructions' results
+with independent Rust models; it skips with a message when Clang is absent.
 Native runtime verification on macOS and Windows remains separate from these
 host-independent guest fixtures.
 

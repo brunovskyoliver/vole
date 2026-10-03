@@ -1269,3 +1269,17 @@ fn writes_to_code_fault_with_a_clear_message() {
         assert_atomic_fault(&image, prefix, "Write to read-only memory");
     }
 }
+
+/// Guest values must never panic the host: the 128-bit signed dividend
+/// i128::MIN divided by -1 is a #DE fault, and a descending LDM below address
+/// zero wraps to an unmapped address and faults.
+#[test]
+fn extreme_operands_fault_instead_of_panicking() {
+    let image = program(
+        Architecture::X64,
+        "movabs rdx, 0x8000000000000000\nxor eax, eax\nmov rcx, -1\nidiv rcx\nint3",
+    );
+    assert_atomic_fault(&image, 3, "#DE");
+    let image = program(Architecture::Arm32, "mov r0, #0\nldmda r0, {r1}\nbkpt #0");
+    assert_atomic_fault(&image, 1, "nmapped");
+}

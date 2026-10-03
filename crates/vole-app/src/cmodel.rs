@@ -2,7 +2,7 @@
 //! machine code under the C line it came from and naming where variables live.
 use vole_core::{
     Instruction,
-    debug::{DebugInfo, FrameView, Location, VariableKind, VariableView},
+    debug::{DebugInfo, Storage, VariableKind, VariableView},
 };
 
 /// A contiguous run of instructions produced by one C line, or by code without
@@ -115,52 +115,9 @@ fn signed_offset(register: &str, offset: i64) -> String {
     }
 }
 
-/// Resolve a location list entry for `pc`; other locations pass through.
-fn at_pc(location: &Location, pc: u64) -> Option<&Location> {
-    match location {
-        Location::List(ranges) => ranges
-            .iter()
-            .find(|range| (range.start..range.end).contains(&pc))
-            .and_then(|range| at_pc(&range.location, pc)),
-        location => Some(location),
-    }
-}
-
-/// Symbolic form of a memory location such as `[x29−4]`, or a register name.
-fn symbolic(location: &Location, frame_base: Option<&Location>, pc: u64) -> Option<Symbolic> {
-    match at_pc(location, pc)? {
-        Location::FrameOffset(offset) => match frame_base.and_then(|base| at_pc(base, pc))? {
-            Location::Register(register) => {
-                Some(Symbolic::Memory(signed_offset(register, *offset)))
-            }
-            Location::RegisterOffset {
-                register,
-                offset: base,
-            } => Some(Symbolic::Memory(signed_offset(register, base + offset))),
-            _ => None,
-        },
-        Location::RegisterOffset { register, offset } => {
-            Some(Symbolic::Memory(signed_offset(register, *offset)))
-        }
-        Location::Register(register) => Some(Symbolic::Register(register.clone())),
-        Location::Address(_) => Some(Symbolic::Static),
-        Location::List(_) | Location::Unavailable(_) => None,
-    }
-}
-
-enum Symbolic {
-    Memory(String),
-    Register(String),
-    Static,
-}
-
-/// Describe where `variable` lives. Frame-relative variables use the frame's
-/// function from `debug`; children and globals use their address.
-pub fn location_chip(
-    variable: &VariableView,
-    frame: Option<&FrameView>,
-    debug: Option<&DebugInfo>,
-) -> Option<LocationChip> {
+/// Describe where `variable` lives, using the storage the debugger resolved
+/// at the frame's PC. Children and other addressed values use their address.
+pub fn location_chip(variable: &VariableView) -> Option<LocationChip> {
     let memory = |text: String, description: String, address: u64| LocationChip {
         text,
         description,
@@ -169,48 +126,35 @@ pub fn location_chip(
             size: variable.size,
         },
     };
-    let symbolic = match (variable.kind, frame, debug) {
-        (VariableKind::Parameter | VariableKind::Local, Some(frame), Some(debug)) => {
-            debug.function_at(frame.pc).and_then(|function| {
-                function
-                    .variables
-                    .iter()
-                    .filter(|v| v.name == variable.name)
-                    .find(|v| {
-                        v.scope.is_empty()
-                            || v.scope
-                                .iter()
-                                .any(|(start, end)| (*start..*end).contains(&frame.pc))
-                    })
-                    .and_then(|v| symbolic(&v.location, function.frame_base.as_ref(), frame.pc))
-            })
-        }
-        _ => None,
-    };
-    match (symbolic, variable.address) {
-        (Some(Symbolic::Register(register)), _) => Some(LocationChip {
+    match (&variable.storage, variable.address) {
+        (Some(Storage::Register(register)), _) => Some(LocationChip {
             description: format!("Value is held in register {register}"),
             text: register.clone(),
-            target: ChipTarget::Register(register),
+            target: ChipTarget::Register(register.clone()),
         }),
-        (Some(Symbolic::Memory(text)), Some(address)) => Some(memory(
-            text.clone(),
-            format!(
-                "Stored at {text} = {}, {} bytes. Show in memory.",
-                hex_address(address),
-                variable.size
-            ),
-            address,
-        )),
-        (Some(Symbolic::Static), Some(address)) => Some(memory(
-            format!("static {}", hex_address(address)),
-            format!(
-                "Static storage at {}, {} bytes. Show in memory.",
-                hex_address(address),
-                variable.size
-            ),
-            address,
-        )),
+        (Some(Storage::RegisterOffset { register, offset }), Some(address)) => {
+            let text = signed_offset(register, *offset);
+            Some(memory(
+                text.clone(),
+                format!(
+                    "Stored at {text} = {}, {} bytes. Show in memory.",
+                    hex_address(address),
+                    variable.size
+                ),
+                address,
+            ))
+        }
+        (Some(Storage::Static), Some(address)) if variable.kind != VariableKind::Global => {
+            Some(memory(
+                format!("static {}", hex_address(address)),
+                format!(
+                    "Static storage at {}, {} bytes. Show in memory.",
+                    hex_address(address),
+                    variable.size
+                ),
+                address,
+            ))
+        }
         (_, Some(address)) if variable.kind == VariableKind::Global => Some(memory(
             format!("global {}", hex_address(address)),
             format!(
@@ -249,7 +193,7 @@ pub fn unavailable_text(reason: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vole_core::debug::{Function, LocationRange, ValueText, Variable};
+    use vole_core::debug::{Function, Location, ValueText, Variable};
 
     fn instruction(address: u64, line: Option<usize>) -> Instruction {
         Instruction {
@@ -278,7 +222,12 @@ mod tests {
         }
     }
 
-    fn view(name: &str, kind: VariableKind, address: Option<u64>) -> VariableView {
+    fn view(
+        name: &str,
+        kind: VariableKind,
+        address: Option<u64>,
+        storage: Option<Storage>,
+    ) -> VariableView {
         VariableView {
             name: name.into(),
             type_name: "int".into(),
@@ -288,6 +237,7 @@ mod tests {
             size: 4,
             children: Vec::new(),
             changed: false,
+            storage,
         }
     }
 
@@ -324,48 +274,16 @@ mod tests {
 
     #[test]
     fn chips_name_frame_slots_registers_and_globals() {
-        let variables = vec![
-            Variable {
-                name: "count".into(),
-                type_id: None,
-                location: Location::FrameOffset(-4),
-                decl_file: 0,
-                decl_line: 2,
-                parameter: false,
-                scope: Vec::new(),
-            },
-            Variable {
-                name: "value".into(),
-                type_id: None,
-                location: Location::List(vec![LocationRange {
-                    start: 0x1000,
-                    end: 0x1010,
-                    location: Location::Register("x0".into()),
-                }]),
-                decl_file: 0,
-                decl_line: 2,
-                parameter: true,
-                scope: Vec::new(),
-            },
-        ];
-        let debug = DebugInfo {
-            functions: vec![function("square", 0x1000, 0x1020, true, variables)],
-            ..Default::default()
+        let slot = Storage::RegisterOffset {
+            register: "x29".into(),
+            offset: -4,
         };
-        let frame = FrameView {
-            index: 0,
-            function: "square".into(),
-            pc: 0x1004,
-            cfa: None,
-            location: None,
-            user: true,
-            variables: Vec::new(),
-        };
-        let chip = location_chip(
-            &view("count", VariableKind::Local, Some(0x1ffdc)),
-            Some(&frame),
-            Some(&debug),
-        )
+        let chip = location_chip(&view(
+            "count",
+            VariableKind::Local,
+            Some(0x1ffdc),
+            Some(slot),
+        ))
         .unwrap();
         assert_eq!(chip.text, "[x29\u{2212}4]");
         assert_eq!(
@@ -375,28 +293,28 @@ mod tests {
                 size: 4
             }
         );
-        let chip = location_chip(
-            &view("value", VariableKind::Parameter, None),
-            Some(&frame),
-            Some(&debug),
-        )
-        .unwrap();
+        let register = Some(Storage::Register("x0".into()));
+        let chip = location_chip(&view("value", VariableKind::Parameter, None, register)).unwrap();
         assert_eq!(chip.target, ChipTarget::Register("x0".into()));
-        let chip = location_chip(
-            &view("total", VariableKind::Global, Some(0xa000)),
-            None,
-            None,
-        )
+        let chip = location_chip(&view(
+            "total",
+            VariableKind::Global,
+            Some(0xa000),
+            Some(Storage::Static),
+        ))
         .unwrap();
         assert_eq!(chip.text, "global 0x0000A000");
-        let chip = location_chip(
-            &view("[1]", VariableKind::Element, Some(0x1ffe0)),
-            None,
-            None,
-        )
+        let chip = location_chip(&view(
+            "counter",
+            VariableKind::Local,
+            Some(0xa004),
+            Some(Storage::Static),
+        ))
         .unwrap();
+        assert_eq!(chip.text, "static 0x0000A004");
+        let chip = location_chip(&view("[1]", VariableKind::Element, Some(0x1ffe0), None)).unwrap();
         assert_eq!(chip.text, "0x0001FFE0");
-        assert!(location_chip(&view("gone", VariableKind::Local, None), None, None).is_none());
+        assert!(location_chip(&view("gone", VariableKind::Local, None, None)).is_none());
     }
 
     #[test]

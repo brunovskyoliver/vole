@@ -482,8 +482,8 @@ impl ScalarMachine {
                 let base_value = self.get(base);
                 let start = match mode {
                     "ia" => base_value,
-                    "ib" => base_value + 4,
-                    "da" => base_value.wrapping_sub(size) + 4,
+                    "ib" => base_value.wrapping_add(4),
+                    "da" => base_value.wrapping_sub(size).wrapping_add(4),
                     _ => base_value.wrapping_sub(size),
                 } & 0xffff_ffff;
                 let final_base = if matches!(mode, "ia" | "ib") {

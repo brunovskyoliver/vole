@@ -221,12 +221,11 @@ def c_smoke(binary, folder, environment):
         source = Path(directory) / "smoke.c"
         source.write_text(C_SMOKE)
         for target in ["arm64", "x64", "arm32", "x86"]:
-            state = json.loads(run([binary, "--arch", target, "--source", source, "--json"],
-                                   cwd=folder, env=environment, timeout=60))
-            output = bytes(state["output"]).decode()
-            if not state["halted"] or output != C_SMOKE_OUTPUT:
-                raise RuntimeError(f"Packaged C smoke on {target} printed {output!r}")
-            results[target] = {"halted": True, "steps": state["steps"], "output": output}
+            report = json.loads(run([binary, "--arch", target, "--source", source, "--json"],
+                                    cwd=folder, env=environment, timeout=60))
+            if report["state"] != "Halted" or report["exit_status"] != 0 or report["output"] != C_SMOKE_OUTPUT:
+                raise RuntimeError(f"Packaged C smoke on {target} printed {report['output']!r}")
+            results[target] = {"halted": True, "steps": report["steps"], "output": report["output"]}
     return results
 
 

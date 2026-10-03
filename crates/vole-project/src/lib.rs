@@ -125,6 +125,9 @@ impl Project {
                 "C projects target ARM32, ARM64, x86 or x64.".into(),
             ));
         }
+        if self.source_breakpoints.len() > 10_000 || self.breakpoints.len() > 10_000 {
+            return Err(SimError("Projects hold at most 10000 breakpoints.".into()));
+        }
         if self
             .source_breakpoints
             .iter()

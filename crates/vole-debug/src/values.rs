@@ -3,7 +3,7 @@ use crate::{Target, UnwoundFrame, abi, address_mask, unwind::little_endian};
 use vole_core::{
     Architecture, DebugInfo,
     debug::{
-        BaseEncoding, Function, Location, Member, Type, TypeKind, ValueText, Variable,
+        BaseEncoding, Function, Location, Member, Storage, Type, TypeKind, ValueText, Variable,
         VariableKind, VariableView,
     },
 };
@@ -28,10 +28,15 @@ enum Place {
     Unavailable(String),
 }
 
+/// Total value nodes one debug view may build, whatever the type nesting.
+pub const MAX_NODES: usize = 20_000;
+
 pub struct Evaluator<'a> {
     pub debug: &'a DebugInfo,
     pub architecture: Architecture,
     pub target: &'a dyn Target,
+    /// Remaining value nodes; bounds rendering of deeply nested aggregates.
+    pub budget: std::cell::Cell<usize>,
 }
 
 impl Evaluator<'_> {
@@ -80,7 +85,12 @@ impl Evaluator<'_> {
                 } else {
                     self.place(frame, Some(function), &variable.location, 0)
                 };
-                self.view(&variable.name, kind, variable.type_id, place, 0)
+                let available = !matches!(place, Place::Unavailable(_));
+                let mut view = self.view(&variable.name, kind, variable.type_id, place, 0);
+                if available {
+                    view.storage = self.storage(&variable.location, Some(function), pc, 0);
+                }
+                view
             })
             .collect()
     }
@@ -93,13 +103,15 @@ impl Evaluator<'_> {
             .filter(|v: &&Variable| self.debug.is_user_file(v.decl_file))
             .map(|variable| {
                 let place = self.place(frame, None, &variable.location, 0);
-                self.view(
+                let mut view = self.view(
                     &variable.name,
                     VariableKind::Global,
                     variable.type_id,
                     place,
                     0,
-                )
+                );
+                view.storage = self.storage(&variable.location, None, frame.lookup_pc, 0);
+                view
             })
             .collect()
     }
@@ -193,6 +205,13 @@ impl Evaluator<'_> {
     }
 
     fn size_of(&self, id: Option<usize>) -> Option<u64> {
+        self.size_of_depth(id, 0)
+    }
+
+    fn size_of_depth(&self, id: Option<usize>, depth: usize) -> Option<u64> {
+        if depth > 32 {
+            return None;
+        }
         let own = self.debug.types.get(id?)?;
         if own.size > 0 {
             return Some(own.size);
@@ -206,7 +225,7 @@ impl Evaluator<'_> {
             TypeKind::Array {
                 element,
                 count: Some(count),
-            } => self.size_of(*element)?.checked_mul(*count),
+            } => self.size_of_depth(*element, depth + 1)?.checked_mul(*count),
             _ => None,
         }
     }
@@ -320,9 +339,15 @@ impl Evaluator<'_> {
             Place::Memory(address) => Some(address),
             _ => None,
         };
+        let remaining = self.budget.get();
+        self.budget.set(remaining.saturating_sub(1));
         let (value, children) = match place {
             Place::Unavailable(reason) => (ValueText::Unavailable(reason), Vec::new()),
             _ if type_id.is_none() => (ValueText::Unavailable(UNKNOWN_TYPE.into()), Vec::new()),
+            _ if remaining == 0 => (
+                ValueText::Unavailable("Too many nested values to show".into()),
+                Vec::new(),
+            ),
             place => self.render(name, type_id, &place, depth),
         };
         VariableView {
@@ -334,6 +359,48 @@ impl Evaluator<'_> {
             size,
             children,
             changed: false,
+            storage: None,
+        }
+    }
+
+    /// Symbolic storage of `location` at the frame's PC, e.g. `[x29-4]` or `x19`.
+    fn storage(
+        &self,
+        location: &Location,
+        function: Option<&Function>,
+        pc: u64,
+        depth: usize,
+    ) -> Option<Storage> {
+        let at_pc = |location: &'_ Location| -> Option<Location> {
+            match location {
+                Location::List(ranges) => ranges
+                    .iter()
+                    .find(|range| (range.start..range.end).contains(&pc))
+                    .map(|range| range.location.clone()),
+                other => Some(other.clone()),
+            }
+        };
+        if depth > 1 {
+            return None;
+        }
+        match at_pc(location)? {
+            Location::FrameOffset(offset) => match at_pc(function?.frame_base.as_ref()?)? {
+                Location::Register(register) => Some(Storage::RegisterOffset { register, offset }),
+                Location::RegisterOffset {
+                    register,
+                    offset: base,
+                } => Some(Storage::RegisterOffset {
+                    register,
+                    offset: base.wrapping_add(offset),
+                }),
+                _ => None,
+            },
+            Location::RegisterOffset { register, offset } => {
+                Some(Storage::RegisterOffset { register, offset })
+            }
+            Location::Register(register) => Some(Storage::Register(register)),
+            Location::Address(_) => Some(Storage::Static),
+            Location::List(_) | Location::Unavailable(_) => None,
         }
     }
 
@@ -515,7 +582,9 @@ impl Evaluator<'_> {
         let children: Vec<VariableView> = if depth < MAX_DEPTH {
             (0..shown)
                 .map(|index| {
-                    let place = Place::Memory(address.wrapping_add(index * stride) & self.mask());
+                    let place = Place::Memory(
+                        address.wrapping_add(index.wrapping_mul(stride)) & self.mask(),
+                    );
                     self.view(
                         &format!("[{index}]"),
                         VariableKind::Element,
