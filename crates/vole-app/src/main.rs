@@ -146,7 +146,6 @@ struct Workbench {
     view: Arc<SessionView>,
     editor: Entity<EditorState>,
     address_input: Entity<InputState>,
-    value_input: Entity<InputState>,
     pc_decoration: RangeDecorationCollection,
     frame_decoration: RangeDecorationCollection,
     breakpoint_decoration: RangeDecorationCollection,
@@ -156,6 +155,11 @@ struct Workbench {
     last_window_title: String,
     focus: FocusHandle,
     memory_focus: FocusHandle,
+    register_focus: FocusHandle,
+    /// First hex digit typed into the selected memory byte.
+    memory_nibble: Option<u8>,
+    /// Hex digits typed into the selected register, applied with Enter.
+    register_draft: Option<String>,
     /// Pane sizes read from a project file, written back unchanged on save.
     /// The workbench layout itself lives in the user's preferences.
     document_layout: vole_project::Layout,
@@ -324,11 +328,6 @@ impl Workbench {
                 .default_value("00")
                 .placeholder("Hex address")
         });
-        let value_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .default_value("00")
-                .placeholder("Hex value")
-        });
         let pc_decoration = editor.update(cx, |state, cx| {
             state.create_range_decorations_collection(Vec::new(), cx)
         });
@@ -359,7 +358,6 @@ impl Workbench {
             view,
             editor,
             address_input,
-            value_input,
             pc_decoration,
             frame_decoration,
             breakpoint_decoration,
@@ -369,6 +367,9 @@ impl Workbench {
             last_window_title: String::new(),
             focus: cx.focus_handle(),
             memory_focus: cx.focus_handle(),
+            register_focus: cx.focus_handle(),
+            memory_nibble: None,
+            register_draft: None,
             document_layout,
             zoom: preferences.zoom,
             preferences,
@@ -449,15 +450,6 @@ impl Workbench {
                 |this, _, event: &InputEvent, window, cx| {
                     if matches!(event, InputEvent::PressEnter { .. }) {
                         this.go_to_address(window, cx);
-                    }
-                },
-            ),
-            cx.subscribe_in(
-                &self.value_input,
-                window,
-                |this, _, event: &InputEvent, window, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
-                        this.apply_edit(window, cx);
                     }
                 },
             ),
@@ -563,15 +555,6 @@ impl Workbench {
                 self.output_len = output_len;
                 self.output_scroll.scroll_to_bottom();
             }
-            let input = self.value_input.clone();
-            let text = self.edit_value_text();
-            if let Some(handle) = cx.windows().first().copied() {
-                let _ = handle.update(cx, |_, window, cx| {
-                    if !input.focus_handle(cx).is_focused(window) {
-                        input.update(cx, |input, cx| input.set_value(text, window, cx));
-                    }
-                });
-            }
             if old_pc != new_pc
                 && let Some(pc) = new_pc
                 && let Some(index) = self.view.disassembly.iter().position(|i| i.address == pc)
@@ -633,9 +616,10 @@ impl Workbench {
                 .filter(|_| self.image_current())
                 .find(|i| i.source_line == Some(cursor_line as usize + 1))
             {
-                let address = instruction.address;
-                self.selected = address;
-                self.selection_len = 1;
+                // Outline every byte of the instruction, as selecting it does.
+                self.selected = instruction.address;
+                self.selection_len = instruction.bytes.len().max(1) as u64;
+                self.memory_nibble = None;
                 cx.notify();
             } else if self.language == SourceLanguage::C {
                 cx.notify();
@@ -1164,7 +1148,7 @@ impl Workbench {
             .map_or(1, |i| i.bytes.len().max(1) as u64);
         self.memory_base = address & !0xff;
         self.edit_target = EditTarget::Memory(address);
-        self.set_edit_value(window, cx);
+        self.clear_edit_draft();
         if let Some(line) = self
             .view
             .disassembly
@@ -1184,13 +1168,7 @@ impl Workbench {
     }
     /// Show a variable's bytes: page to its address, outline its whole size and
     /// inspect it at its natural width when that is an integer width.
-    fn show_in_memory(
-        &mut self,
-        address: u64,
-        size: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn show_in_memory(&mut self, address: u64, size: u64, _: &mut Window, cx: &mut Context<Self>) {
         self.memory_base = address & !0xff;
         self.selected = address;
         self.selection_len = size.clamp(1, 256);
@@ -1203,7 +1181,7 @@ impl Workbench {
         if self.compact_tab == PanelId::Variables {
             self.compact_tab = PanelId::Memory;
         }
-        self.set_edit_value(window, cx);
+        self.clear_edit_draft();
         cx.notify();
     }
     fn show_register(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -1223,7 +1201,8 @@ impl Workbench {
         if self.compact_tab == PanelId::Variables {
             self.compact_tab = PanelId::Registers;
         }
-        self.set_edit_value(window, cx);
+        self.clear_edit_draft();
+        self.register_focus.focus(window, cx);
         cx.notify();
     }
     /// Move the editor cursor to a 1-based line and column and focus the editor.
@@ -1277,7 +1256,7 @@ impl Workbench {
             });
         }
         self.memory_focus.focus(window, cx);
-        self.set_edit_value(window, cx);
+        self.clear_edit_draft();
         cx.notify();
     }
     fn edit_value_text(&self) -> String {
@@ -1310,10 +1289,10 @@ impl Workbench {
                 .unwrap_or_default(),
         }
     }
-    fn set_edit_value(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.edit_value_text();
-        self.value_input
-            .update(cx, |input, cx| input.set_value(text, window, cx));
+    /// Drop half-typed memory or register input when the selection changes.
+    fn clear_edit_draft(&mut self) {
+        self.memory_nibble = None;
+        self.register_draft = None;
     }
     fn valid_address(&self, address: u64) -> bool {
         match self.architecture.bits() {
@@ -1341,59 +1320,141 @@ impl Workbench {
             }
         }
     }
-    fn apply_edit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.paused() {
-            self.edit_error =
-                Some("Pause the machine and assemble current source before editing.".into());
-            cx.notify();
-            return;
+    /// The hex digit a plain key press types, if any.
+    fn typed_hex_digit(keystroke: &Keystroke) -> Option<u8> {
+        let modifiers = &keystroke.modifiers;
+        if modifiers.control || modifiers.platform || modifiers.alt || modifiers.function {
+            return None;
         }
-        let value = match inspect::parse_hex(&self.value_input.read(cx).value()) {
-            Ok(value) => value,
-            Err(message) => {
-                self.edit_error = Some(message);
+        let mut chars = keystroke.key.chars();
+        let digit = chars.next()?.to_digit(16)?;
+        chars.next().is_none().then_some(digit as u8)
+    }
+    fn editing_allowed(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.paused() {
+            return true;
+        }
+        self.edit_error = Some(if self.view.state == RunState::Running {
+            "Pause the machine before editing.".into()
+        } else {
+            "Assemble or compile the current source before editing.".into()
+        });
+        cx.notify();
+        false
+    }
+    /// Hex-editor typing in the memory grid: two digits overwrite the
+    /// selected byte, then the selection moves to the next byte.
+    fn memory_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "escape" if self.memory_nibble.is_some() => {
+                self.memory_nibble = None;
+                cx.stop_propagation();
                 cx.notify();
                 return;
             }
-        };
-        let command = match &self.edit_target {
-            EditTarget::Memory(address) => {
-                if self.edit_width < 8 && value >= (1u64 << (self.edit_width * 8)) {
-                    self.edit_error =
-                        Some(format!("Value does not fit in {} bytes.", self.edit_width));
+            "backspace" => {
+                cx.stop_propagation();
+                if self.memory_nibble.take().is_some() {
                     cx.notify();
-                    return;
-                }
-                let all = if self.little_endian {
-                    value.to_le_bytes()
                 } else {
-                    value.to_be_bytes()
-                };
-                let bytes = if self.little_endian {
-                    all[..self.edit_width].to_vec()
-                } else {
-                    all[8 - self.edit_width..].to_vec()
-                };
-                Command::EditMemory {
-                    address: *address,
-                    bytes,
+                    self.move_memory(-1, window, cx);
                 }
+                return;
             }
-            EditTarget::Register(name, bits) => {
-                if *bits < 64 && value >= (1u64 << *bits) {
-                    self.edit_error =
-                        Some(format!("Value does not fit in this {bits}-bit register."));
-                    cx.notify();
-                    return;
-                }
-                Command::EditRegister {
-                    name: name.clone(),
-                    value,
-                }
-            }
+            _ => {}
+        }
+        let Some(digit) = Self::typed_hex_digit(keystroke) else {
+            return;
         };
+        cx.stop_propagation();
+        if !self.editing_allowed(cx) {
+            return;
+        }
+        let address = self.selected;
+        if self
+            .view
+            .snapshot
+            .as_ref()
+            .and_then(|s| s.byte(address))
+            .is_none()
+        {
+            self.edit_error = Some("This address is not mapped, so it cannot be edited.".into());
+            cx.notify();
+            return;
+        }
         self.edit_error = None;
-        self.send(command, cx);
+        let Some(high) = self.memory_nibble.take() else {
+            self.memory_nibble = Some(digit);
+            cx.notify();
+            return;
+        };
+        self.send(
+            Command::EditMemory {
+                address,
+                bytes: vec![high << 4 | digit],
+            },
+            cx,
+        );
+        self.move_memory(1, window, cx);
+    }
+    /// Typing into the selected register: hex digits build a new value that
+    /// Enter applies and Escape discards.
+    fn register_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let EditTarget::Register(name, bits) = self.edit_target.clone() else {
+            return;
+        };
+        let keystroke = &event.keystroke;
+        let digits = usize::from(bits).div_ceil(4);
+        match keystroke.key.as_str() {
+            "escape" => {
+                if self.register_draft.take().is_some() {
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
+            "backspace" => {
+                if let Some(draft) = self.register_draft.as_mut() {
+                    draft.pop();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
+            "enter" => {
+                let Some(draft) = self.register_draft.take() else {
+                    return;
+                };
+                cx.stop_propagation();
+                if draft.is_empty() || !self.editing_allowed(cx) {
+                    cx.notify();
+                    return;
+                }
+                let value = u64::from_str_radix(&draft, 16).unwrap_or(0);
+                self.edit_error = None;
+                self.send(Command::EditRegister { name, value }, cx);
+                return;
+            }
+            _ => {}
+        }
+        let Some(digit) = Self::typed_hex_digit(keystroke) else {
+            return;
+        };
+        cx.stop_propagation();
+        if !self.editing_allowed(cx) {
+            return;
+        }
+        let draft = self.register_draft.get_or_insert_with(String::new);
+        if draft.len() < digits {
+            draft.push(
+                char::from_digit(u32::from(digit), 16)
+                    .unwrap_or('0')
+                    .to_ascii_uppercase(),
+            );
+        }
+        self.edit_error = None;
+        cx.notify();
     }
     fn confirm_discard(
         &mut self,
@@ -1701,7 +1762,7 @@ Hide a panel with its × and show it again from Panels. Drag a panel by its titl
         } else {
             "Assemble: Ctrl/Command+Enter. Run or pause: F5. Step: F10. Reverse: Shift+F10. Breakpoint at source line: F9. Fullscreen: F11.
 
-Select an instruction to jump to its source and memory. Select a memory byte or register, enter a hex value, then Apply. Editing clears undo history. Arrow keys move the memory selection.
+Select an instruction to jump to its source and memory. Select a memory byte and type two hex digits to overwrite it; typing continues into the next byte. Select a register, type a hex value and press Enter. Editing clears undo history. Arrow keys move the memory selection.
 
 VOLE uses the SimpSim extended profile. ARM and x86 currently execute the supported scalar teaching subset. Unsupported instructions stop with a fault. Simulated instructions are counted, not hardware cycles.
 
@@ -1775,9 +1836,7 @@ Hide a panel with its × and show it again from Panels. Drag a panel by its titl
         self.move_memory(16, w, cx);
     }
     fn copy_value(&mut self, _: &CopyValue, _: &mut Window, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(
-            self.value_input.read(cx).value().to_string(),
-        ));
+        cx.write_to_clipboard(ClipboardItem::new_string(self.edit_value_text()));
     }
 }
 
@@ -2648,6 +2707,11 @@ impl Workbench {
                     } else {
                         INK
                     };
+                    let editing = matches!(
+                        &self.edit_target,
+                        EditTarget::Register(selected, _) if selected.eq_ignore_ascii_case(&name)
+                    );
+                    let draft = self.register_draft.as_ref().filter(|_| editing);
                     row = row.child(
                         div()
                             .id((ElementId::from("register"), name.clone()))
@@ -2664,6 +2728,8 @@ impl Workbench {
                             .px(px(4.))
                             .py(px(3.))
                             .rounded(px(4.))
+                            .border_1()
+                            .border_color(rgb(if editing { WRITE } else { WORKSPACE }))
                             .bg(rgb(if reads || writes || wrote {
                                 SURFACE
                             } else {
@@ -2674,15 +2740,21 @@ impl Workbench {
                             .cursor_pointer()
                             .hover(|s| s.bg(rgb(SURFACE)))
                             .child(div().text_color(rgb(MUTED)).child(name.clone()))
-                            .child(div().text_color(rgb(color)).child(format!(
-                                "{:0width$X}",
-                                register.value,
-                                width = usize::from(bits).div_ceil(4)
-                            )))
+                            .child(match draft {
+                                Some(draft) => {
+                                    div().text_color(rgb(WRITE)).child(format!("{draft}_"))
+                                }
+                                None => div().text_color(rgb(color)).child(format!(
+                                    "{:0width$X}",
+                                    register.value,
+                                    width = usize::from(bits).div_ceil(4)
+                                )),
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.edit_target = EditTarget::Register(name.clone(), bits);
                                 this.edit_error = None;
-                                this.set_edit_value(window, cx);
+                                this.clear_edit_draft();
+                                this.register_focus.focus(window, cx);
                                 cx.notify();
                             })),
                     );
@@ -2694,6 +2766,9 @@ impl Workbench {
             rows.push(row);
         }
         pane()
+            .track_focus(&self.register_focus)
+            .key_context("Registers")
+            .on_key_down(cx.listener(Self::register_key))
             .child(self.panel_heading(
                 PanelId::Registers,
                 format!("{}-bit values", self.architecture.bits()),
@@ -2711,21 +2786,28 @@ impl Workbench {
                             .ghost()
                             .small()
                             .label("PC")
-                            .tooltip("Select program counter to edit")
+                            .tooltip("Select the program counter, then type a hex value and press Enter")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.edit_target =
                                     EditTarget::Register("PC".into(), this.architecture.bits());
-                                this.set_edit_value(window, cx);
+                                this.edit_error = None;
+                                this.clear_edit_draft();
+                                this.register_focus.focus(window, cx);
                                 cx.notify();
                             })),
                     )
                     .child(
-                        mono(format!(
-                            "{:0width$X}",
-                            snapshot.pc,
-                            width = self.architecture.address_digits()
-                        ))
-                        .text_color(rgb(READ)),
+                        match self.register_draft.as_ref().filter(|_| {
+                            matches!(&self.edit_target, EditTarget::Register(name, _) if name == "PC")
+                        }) {
+                            Some(draft) => mono(format!("{draft}_")).text_color(rgb(WRITE)),
+                            None => mono(format!(
+                                "{:0width$X}",
+                                snapshot.pc,
+                                width = self.architecture.address_digits()
+                            ))
+                            .text_color(rgb(READ)),
+                        },
                     ),
             )
             .child(
@@ -2762,9 +2844,9 @@ impl Workbench {
                             }),
                         ))
                     })
-                    .when(!c_mode, |panel| {
-                        panel.child(note("Select a register to inspect or edit it."))
-                    }),
+                    .child(note(
+                        "Select a register and type a hex value, then press Enter. Escape cancels.",
+                    )),
             )
     }
     fn explanation_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -3007,6 +3089,7 @@ impl Workbench {
             .min_h_0()
             .track_focus(&self.memory_focus)
             .key_context("Memory")
+            .on_key_down(cx.listener(Self::memory_key))
             .on_action(cx.listener(Self::memory_left))
             .on_action(cx.listener(Self::memory_right))
             .on_action(cx.listener(Self::memory_up))
@@ -3201,22 +3284,26 @@ impl Workbench {
                     } else {
                         WORKSPACE
                     }))
-                    .text_color(rgb(if wrote {
-                        WRITE
-                    } else if executing || read {
-                        READ
-                    } else if value == Some(0) || value.is_none() {
-                        MUTED
-                    } else {
-                        INK
-                    }))
+                    .text_color(rgb(
+                        if wrote || self.memory_nibble.is_some() && byte_address == self.selected {
+                            WRITE
+                        } else if executing || read {
+                            READ
+                        } else if value == Some(0) || value.is_none() {
+                            MUTED
+                        } else {
+                            INK
+                        },
+                    ))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgb(SURFACE)))
-                    .child(
-                        value
+                    .child(match self.memory_nibble {
+                        // The first digit typed into this byte, waiting for the second.
+                        Some(high) if byte_address == self.selected => format!("{high:X}_"),
+                        _ => value
                             .map(|b| format!("{b:02X}"))
                             .unwrap_or_else(|| "--".into()),
-                    )
+                    })
                     .on_click(
                         cx.listener(move |this, _, w, cx| this.select_memory(byte_address, w, cx)),
                     ),
@@ -3301,7 +3388,7 @@ impl Workbench {
                                     if self.edit_width == 1 { "" } else { "s" }
                                 ))
                                 .tooltip("Cycle inspection width: 1, 2, 4, 8 bytes")
-                                .on_click(cx.listener(|this, _, w, cx| {
+                                .on_click(cx.listener(|this, _, _, cx| {
                                     this.edit_width = match this.edit_width {
                                         1 => 2,
                                         2 => 4,
@@ -3309,7 +3396,7 @@ impl Workbench {
                                         _ => 1,
                                     };
                                     this.selection_len = this.edit_width as u64;
-                                    this.set_edit_value(w, cx);
+                                    this.clear_edit_draft();
                                     cx.notify();
                                 })),
                         )
@@ -3322,38 +3409,29 @@ impl Workbench {
                                 } else {
                                     "Big endian"
                                 })
-                                .on_click(cx.listener(|this, _, w, cx| {
+                                .on_click(cx.listener(|this, _, _, cx| {
                                     this.little_endian = !this.little_endian;
-                                    this.set_edit_value(w, cx);
+                                    this.clear_edit_draft();
                                     cx.notify();
                                 })),
                         ),
                 )
             })
-            .child(note("Hexadecimal value"))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .child(
-                        Input::new(&self.value_input)
-                            .aria_label("Hexadecimal register or memory value")
-                            .font_family(MONO)
-                            .small()
-                            .disabled(!self.paused())
-                            .flex_1(),
-                    )
-                    .child(
-                        Button::new("apply-value")
-                            .small()
-                            .label("Apply")
-                            .disabled(!self.paused())
-                            .on_click(cx.listener(|this, _, w, cx| this.apply_edit(w, cx))),
-                    ),
-            );
+            .child(note(match self.edit_target {
+                EditTarget::Memory(_) => {
+                    "Type two hex digits on a selected byte to overwrite it; typing continues into the next byte."
+                }
+                EditTarget::Register(_, _) => {
+                    "Type a hex value on the selected register, then press Enter. Escape cancels."
+                }
+            }));
         if let Some(value) = value {
             panel = panel
+                .child(
+                    mono(format!("Hex       {}", self.edit_value_text()))
+                        .text_size(px(11.))
+                        .text_color(rgb(INK)),
+                )
                 .child(
                     mono(format!("Unsigned  {value}"))
                         .text_size(px(11.))

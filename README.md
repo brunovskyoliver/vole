@@ -94,7 +94,10 @@ Choose a target; its example program opens automatically (Vole asks first if
 the current document has unsaved changes). Assemble, then Step to advance one instruction;
 Run/Pause executes in bounded batches. Reverse step restores retained machine
 state. Click an instruction gutter or press F9 to toggle a breakpoint. Memory
-and registers are editable while paused, with read/write watchpoints available.
+and registers are editable while paused: select a memory byte and type two hex
+digits to overwrite it (typing continues into the next byte; Backspace steps
+back), or select a register, type a hex value and press Enter (Escape
+cancels). Read/write watchpoints are available from the memory inspector.
 
 Open `.c` or `.s`/`.asm` source, `.bin`/`.prg` bytes, whitespace hexadecimal
 `.hex`, or `.voleproject`/JSON projects. Projects retain source, language,
