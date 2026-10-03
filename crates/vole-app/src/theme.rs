@@ -66,30 +66,6 @@ pub fn pane() -> Div {
         .bg(rgb(WORKSPACE))
         .text_color(rgb(INK))
 }
-pub fn heading(title: impl Into<SharedString>, detail: impl Into<SharedString>) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .flex_none()
-        .h(px(52.))
-        .px(px(20.))
-        .gap(px(12.))
-        .border_b_1()
-        .border_color(rgb(DIVIDER))
-        .child(
-            div()
-                .text_size(px(16.))
-                .font_weight(FontWeight::MEDIUM)
-                .child(title.into()),
-        )
-        .child(
-            div()
-                .text_size(px(12.))
-                .text_color(rgb(MUTED))
-                .child(detail.into()),
-        )
-}
 pub fn note(text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(12.))

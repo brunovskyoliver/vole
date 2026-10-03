@@ -46,8 +46,11 @@ Source edits disable execution until reassembly. Paused register/flag/memory
 edits clear undo history. Self-modification updates live disassembly; Reset
 restores the initial image and its source associations.
 
-Projects preserve source, target, image, current machine state, breakpoints
-and pane sizes. Source-only documents and raw-byte/hex imports are
+Projects preserve source, target, image, current machine state and
+breakpoints. The workbench layout (hidden, moved and resized panels, one
+layout per language) and text size are user preferences saved in
+`workbench.json`, not part of a project; older projects' pane sizes are kept
+and written back unchanged. Source-only documents and raw-byte/hex imports are
 also supported. Project writes use a temporary file and atomic replacement.
 Image/source mismatches are rejected. Exported raw bytes use a documented
 fixed origin; projects preserve custom origins and entry points.

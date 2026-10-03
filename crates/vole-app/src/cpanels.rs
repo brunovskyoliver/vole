@@ -3,6 +3,7 @@
 use crate::{
     Workbench,
     cmodel::{self, ChipTarget, MachineRow},
+    dock::PanelId,
     theme::*,
 };
 use gpui::{prelude::*, *};
@@ -25,7 +26,7 @@ impl Workbench {
     /// C images live below 0x20000 on every target, so machine code uses eight
     /// digits even on 64-bit targets; this leaves room for the assembly text.
     fn address_width(&self) -> f32 {
-        82.
+        82. * self.zoom
     }
 
     pub(crate) fn machine_code_panel(&self, cx: &mut Context<Self>) -> Div {
@@ -42,8 +43,8 @@ impl Workbench {
             "Compile to see the machine code for each C line."
         };
         pane()
-            .child(heading(
-                "Machine code",
+            .child(self.panel_heading(
+                PanelId::Code,
                 if count == 0 {
                     String::new()
                 } else {
@@ -52,6 +53,7 @@ impl Workbench {
                         self.view.disassembly.len()
                     )
                 },
+                cx,
             ))
             .child(
                 div()
@@ -60,11 +62,11 @@ impl Workbench {
                     .gap(px(12.))
                     .pl(px(20. + RAIL))
                     .pr(px(20.))
-                    .h(px(28.))
+                    .h(px(28. * self.zoom))
                     .flex_none()
                     .border_b_1()
                     .border_color(rgb(DIVIDER))
-                    .text_size(px(12.))
+                    .text_size(px(12. * self.zoom))
                     .text_color(rgb(MUTED))
                     .child(div().w(px(22.)).flex_none())
                     .child(
@@ -73,7 +75,7 @@ impl Workbench {
                             .flex_none()
                             .child("Address"),
                     )
-                    .child(div().w(px(130.)).flex_none().child("Bytes"))
+                    .child(div().w(px(130. * self.zoom)).flex_none().child("Bytes"))
                     .child("Assembly"),
             )
             .child(
@@ -323,7 +325,7 @@ impl Workbench {
                     )
                     .child(
                         div()
-                            .w(px(130.))
+                            .w(px(130. * self.zoom))
                             .flex_none()
                             .min_w_0()
                             .overflow_hidden()
@@ -513,13 +515,14 @@ impl Workbench {
         }
         let note_text = debug.and_then(|d| d.note.clone());
         pane()
-            .child(heading(
-                "Call stack",
+            .child(self.panel_heading(
+                PanelId::CallStack,
                 match frames.len() {
                     0 => String::new(),
                     1 => "1 frame".into(),
                     n => format!("{n} frames"),
                 },
+                cx,
             ))
             .when(frames.is_empty(), |panel| {
                 panel.child(
@@ -607,11 +610,12 @@ impl Workbench {
         }
         let empty = rows.is_empty();
         pane()
-            .child(heading(
-                "Variables",
+            .child(self.panel_heading(
+                PanelId::Variables,
                 frame
                     .map(|f| f.function.clone())
                     .unwrap_or_default(),
+                cx,
             ))
             .child(
                 div()
@@ -783,7 +787,7 @@ impl Workbench {
             .tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
             .flex_none()
             .px(px(6.))
-            .h(px(20.))
+            .h(px(20. * self.zoom))
             .flex()
             .items_center()
             .rounded(px(4.))
@@ -804,16 +808,17 @@ impl Workbench {
             .into_any_element()
     }
 
-    pub(crate) fn output_panel(&self) -> Div {
+    pub(crate) fn output_panel(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = self.view.snapshot.as_ref();
         let output = snapshot
             .map(|s| String::from_utf8_lossy(&s.output).to_string())
             .unwrap_or_default();
         let exit = self.view.debug.as_ref().and_then(|d| d.exit_status);
         pane()
-            .child(heading(
-                "Output",
+            .child(self.panel_heading(
+                PanelId::Output,
                 format!("{} instructions", snapshot.map_or(0, |s| s.steps)),
+                cx,
             ))
             .child(
                 div()

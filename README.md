@@ -74,7 +74,9 @@ syntax, memory layout, the C scope and limits.
 
 Choose a real target and switch the toggle beside it to **C**. The default
 C example is a short tour (arithmetic, loops, recursion, arrays, pointers and
-`printf`); **Examples** lists the others in `examples/c`. Compile with
+`printf`); the **Examples** menu lists the others in `examples/c`. Changing
+the target keeps C source and rebuilds it; choosing VOLE opens VOLE assembly,
+since VOLE has no C compiler. Compile with
 Ctrl/Cmd+Enter. Click a line and press F9 for a breakpoint, then Continue
 (F5). The machine code is grouped under the C line it came from, the call
 stack and variables follow the selected frame, and each variable's location
@@ -88,7 +90,8 @@ scope.
 
 ### Assembly
 
-Choose a target, load its example, then Assemble. Step advances one instruction;
+Choose a target; its example program opens automatically (Vole asks first if
+the current document has unsaved changes). Assemble, then Step to advance one instruction;
 Run/Pause executes in bounded batches. Reverse step restores retained machine
 state. Click an instruction gutter or press F9 to toggle a breakpoint. Memory
 and registers are editable while paused, with read/write watchpoints available.
@@ -96,7 +99,7 @@ and registers are editable while paused, with read/write watchpoints available.
 Open `.c` or `.s`/`.asm` source, `.bin`/`.prg` bytes, whitespace hexadecimal
 `.hex`, or `.voleproject`/JSON projects. Projects retain source, language,
 architecture, compiler settings, the built image with its debug metadata,
-current registers/memory/flags/output, breakpoints and pane sizes. C projects
+current registers/memory/flags/output and breakpoints. C projects
 are saved as version 2; assembly projects stay version 1 so earlier releases
 can open them.
 Prior undo history is not persisted. Raw images use origin 00 for VOLE and
@@ -112,8 +115,27 @@ Prior undo history is not persisted. Raw images use origin 00 for VOLE and
 | Toggle breakpoint (cursor line) | F9 |
 | Reset | Ctrl+R / Cmd+R |
 | Open / Save | Ctrl+O / Ctrl+S, or Cmd on macOS |
+| Larger / smaller code and data text | Ctrl+= / Ctrl+-, or Cmd on macOS (80–200%) |
 | Fullscreen | F11 in assembly, Ctrl+Shift+F (Ctrl+Cmd+F on macOS) anywhere |
 | Help | F1 |
+
+### Examples and layout
+
+On macOS the menu bar has an **Examples** menu with every C program and the
+starter program of each instruction set. Linux and Windows show the same list
+from the **Examples** button in the toolbar.
+
+Every panel can be hidden with the × in its heading and shown again from
+**Panels** in the toolbar (or View in the macOS menu bar). Drag a panel by its
+title onto another panel: the edges place it beside, above or below that
+panel, the centre swaps the two, and the strips along the window's left, right
+and bottom edges give it a full-height column or a full-width row. Drag the
+gaps between panels to resize them. Assembly and C keep separate layouts.
+Layouts and the text size are saved as you change them, in `workbench.json`
+under `~/Library/Application Support/Vole` (macOS), `%APPDATA%\Vole`
+(Windows) or `$XDG_CONFIG_HOME/vole` (Linux); `VOLE_CONFIG_DIR` overrides the
+folder. **Reset layout** restores the defaults. Windows narrower than 1150
+pixels show the visible panels as tabs.
 
 ## Verify and package
 

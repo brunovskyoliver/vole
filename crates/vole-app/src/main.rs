@@ -8,7 +8,6 @@ use gpui_kit::component::{
         Editor, EditorState, Input, InputEvent, InputState, Position, RangeDecoration,
         RangeDecorationCollection, RangeDecorationStyle, TextDecorationCollection,
     },
-    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
 };
 use std::{
     borrow::Cow,
@@ -24,10 +23,13 @@ use vole_runtime::{Command, RunState, Runtime, SessionView, SourceStep};
 
 mod cmodel;
 mod cpanels;
+mod dock;
+mod dockview;
 mod inspect;
 mod prompts;
 mod syntax;
 mod theme;
+use dock::{PanelId, Preferences};
 use theme::*;
 
 actions!(
@@ -56,24 +58,36 @@ actions!(
         MemoryRight,
         MemoryUp,
         MemoryDown,
-        CopyValue
+        CopyValue,
+        ResetLayout
     ]
 );
 
-#[derive(Clone, Copy, PartialEq)]
-enum CompactTab {
-    Source,
-    Instructions,
-    Variables,
-    Memory,
-    Registers,
-    Trace,
+/// A built-in document offered by the Examples menu.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Example {
+    /// Index into `vole_c::EXAMPLES`; runs on the current target, or ARM64 from VOLE.
+    C(usize),
+    /// The starter program for one instruction set.
+    Assembly(Architecture),
 }
+
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = vole, no_json)]
+struct OpenExample {
+    example: Example,
+}
+
+#[derive(Debug, Clone, PartialEq, Action)]
+#[action(namespace = vole, no_json)]
+struct TogglePanel {
+    panel: PanelId,
+}
+
 #[derive(Clone)]
 enum DiscardOperation {
     Open,
-    Example,
-    Language(SourceLanguage),
+    Example(Example),
     Close,
     Quit,
 }
@@ -82,6 +96,21 @@ fn example_source(architecture: Architecture, language: SourceLanguage) -> Strin
     match language {
         SourceLanguage::Assembly => architecture.example_source().to_string(),
         SourceLanguage::C => vole_c::default_example().to_string(),
+    }
+}
+
+/// Names accepted by `--tab` for each panel.
+fn tab_names(id: PanelId) -> &'static [&'static str] {
+    match id {
+        PanelId::Source => &["source"],
+        PanelId::Code => &["machine", "instructions"],
+        PanelId::Memory => &["memory"],
+        PanelId::Registers => &["registers"],
+        PanelId::Explanation => &["explanation"],
+        PanelId::Trace => &["trace"],
+        PanelId::CallStack => &["stack", "call-stack"],
+        PanelId::Variables => &["variables"],
+        PanelId::Output => &["output"],
     }
 }
 
@@ -102,7 +131,8 @@ enum EditTarget {
 struct DesktopSession {
     initial_architecture: Architecture,
     initial_language: SourceLanguage,
-    initial_tab: Option<CompactTab>,
+    /// `--tab` name of the panel shown first in the compact layout.
+    initial_tab: Option<String>,
     /// Document to open at startup (`--open`), read before the window appears.
     initial_document: Option<PathBuf>,
     initial_optimization: Optimization,
@@ -126,10 +156,20 @@ struct Workbench {
     last_window_title: String,
     focus: FocusHandle,
     memory_focus: FocusHandle,
-    split_main: Entity<ResizableState>,
-    split_source: Entity<ResizableState>,
-    split_vertical: Entity<ResizableState>,
-    pending_layout: Option<vole_project::Layout>,
+    /// Pane sizes read from a project file, written back unchanged on save.
+    /// The workbench layout itself lives in the user's preferences.
+    document_layout: vole_project::Layout,
+    preferences: Preferences,
+    preferences_path: Option<PathBuf>,
+    /// Preferences changed since they were last written.
+    layout_dirty: bool,
+    /// Panel being dragged by its heading, for drop-zone overlays.
+    dragging_panel: Option<PanelId>,
+    /// True below the docked layout's minimum width; panels become tabs.
+    compact: bool,
+    viewport_width: f32,
+    panel_menu: bool,
+    example_menu_open: bool,
     instruction_scroll: UniformListScrollHandle,
     architecture: Architecture,
     language: SourceLanguage,
@@ -139,7 +179,6 @@ struct Workbench {
     selected_frame: usize,
     /// C example chosen in the example menu; replaces the document after confirmation.
     example_index: usize,
-    example_menu: bool,
     /// Expanded variable rows, keyed by function and path.
     expanded: BTreeSet<String>,
     /// Breakpoint line whose resolution should be reported after the runtime answers.
@@ -161,7 +200,7 @@ struct Workbench {
     edit_width: usize,
     little_endian: bool,
     architecture_menu: bool,
-    compact_tab: CompactTab,
+    compact_tab: PanelId,
     file_path: Option<PathBuf>,
     saved_source: String,
     edit_error: Option<String>,
@@ -221,10 +260,24 @@ impl Workbench {
                 .into()
             }
         };
-        let compact_tab = session.initial_tab.unwrap_or(CompactTab::Source);
+        let compact_tab = session
+            .initial_tab
+            .as_deref()
+            .and_then(|tab| {
+                PanelId::all(language)
+                    .iter()
+                    .copied()
+                    .find(|id| tab_names(*id).contains(&tab))
+            })
+            .unwrap_or(PanelId::Source);
+        let preferences_path = dock::preferences_path();
+        let preferences = preferences_path
+            .as_deref()
+            .map(Preferences::load)
+            .unwrap_or_default();
         let runtime = Runtime::new(architecture, source.clone());
         let mut file_path = None;
-        let mut pending_layout = None;
+        let mut document_layout = vole_project::Layout::default();
         let mut memory_base = if architecture == Architecture::Vole {
             0
         } else {
@@ -232,7 +285,7 @@ impl Workbench {
         };
         if let Some(document) = document {
             file_path = document.path;
-            pending_layout = document.layout;
+            document_layout = document.layout.unwrap_or_default();
             if let Some(program) = document.program {
                 memory_base = program.entry & !0xff;
                 let _ = runtime.send(Command::Restore {
@@ -316,10 +369,16 @@ impl Workbench {
             last_window_title: String::new(),
             focus: cx.focus_handle(),
             memory_focus: cx.focus_handle(),
-            split_main: cx.new(|_| ResizableState::default()),
-            split_source: cx.new(|_| ResizableState::default()),
-            split_vertical: cx.new(|_| ResizableState::default()),
-            pending_layout,
+            document_layout,
+            zoom: preferences.zoom,
+            preferences,
+            preferences_path,
+            layout_dirty: false,
+            dragging_panel: None,
+            compact: false,
+            viewport_width: 1440.,
+            panel_menu: false,
+            example_menu_open: false,
             instruction_scroll: UniformListScrollHandle::new(),
             architecture,
             language,
@@ -327,7 +386,6 @@ impl Workbench {
             machine_layout: cmodel::MachineLayout::default(),
             selected_frame: 0,
             example_index: 0,
-            example_menu: false,
             expanded: BTreeSet::new(),
             pending_breakpoint_line: None,
             breakpoint_note: None,
@@ -352,7 +410,6 @@ impl Workbench {
             file_path,
             saved_source: source,
             edit_error: open_error,
-            zoom: 1.0,
             last_editor_line: 0,
             demo,
             demo_after: None,
@@ -363,6 +420,7 @@ impl Workbench {
 
     fn bind_window_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.last_window_title.clear();
+        self.refresh_menus(cx);
         self._subscriptions = vec![
             cx.subscribe(&self.editor, |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -547,6 +605,15 @@ impl Workbench {
             self.demo_after = Some(std::time::Instant::now());
             self.send(command, cx);
         }
+        if !cx.has_active_drag() {
+            // A panel dropped outside every drop zone leaves no drop event.
+            if self.dragging_panel.take().is_some() {
+                cx.notify();
+            }
+            if self.layout_dirty {
+                self.save_preferences(cx);
+            }
+        }
         let cursor_line = self.editor.read(cx).cursor_position().line;
         if cursor_line != self.last_editor_line {
             self.last_editor_line = cursor_line;
@@ -593,6 +660,24 @@ impl Workbench {
         }
     }
 
+    /// Write the layout and zoom in the background once a change settles.
+    fn save_preferences(&mut self, cx: &mut Context<Self>) {
+        self.layout_dirty = false;
+        let Some(path) = self.preferences_path.clone() else {
+            return;
+        };
+        let bytes = self.preferences.to_json();
+        cx.background_executor()
+            .spawn(async move {
+                if let Some(folder) = path.parent() {
+                    let _ = std::fs::create_dir_all(folder);
+                }
+                if let Err(error) = atomic_write(&path, &bytes) {
+                    eprintln!("Could not save the workbench layout: {error}");
+                }
+            })
+            .detach();
+    }
     fn update_source_decorations(&mut self, cx: &mut Context<Self>) {
         let source = self.editor.read(cx).value().to_string();
         let line_ranges: Vec<_> = source
@@ -908,19 +993,78 @@ impl Workbench {
         self.pending_breakpoint_line = Some(line);
         self.send(Command::ToggleSourceBreakpoint(line), cx);
     }
-    fn choose_example(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.example_menu = false;
-        self.example_index = index;
-        if !self.confirm_discard(DiscardOperation::Example, window, cx) {
-            self.replace_with_example(window, cx);
-        }
-        cx.notify();
-    }
     fn load_example(&mut self, _: &LoadExample, window: &mut Window, cx: &mut Context<Self>) {
-        if self.confirm_discard(DiscardOperation::Example, window, cx) {
+        let example = match self.language {
+            SourceLanguage::C => Example::C(self.example_index),
+            SourceLanguage::Assembly => Example::Assembly(self.architecture),
+        };
+        self.open_example(example, window, cx);
+    }
+    fn open_example_action(
+        &mut self,
+        action: &OpenExample,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_example(action.example, window, cx);
+    }
+    /// Replace the document with a built-in example, switching the language
+    /// and target it needs, after confirming unsaved changes.
+    fn open_example(&mut self, example: Example, window: &mut Window, cx: &mut Context<Self>) {
+        self.example_menu_open = false;
+        self.architecture_menu = false;
+        cx.notify();
+        if self.view.state == RunState::Running {
             return;
         }
+        if !self.confirm_discard(DiscardOperation::Example(example), window, cx) {
+            self.apply_example(example, window, cx);
+        }
+    }
+    fn apply_example(&mut self, example: Example, window: &mut Window, cx: &mut Context<Self>) {
+        let (architecture, language) = match example {
+            Example::C(index) => {
+                self.example_index = index.min(vole_c::EXAMPLES.len().saturating_sub(1));
+                let architecture = if self.architecture == Architecture::Vole {
+                    Architecture::Arm64
+                } else {
+                    self.architecture
+                };
+                (architecture, SourceLanguage::C)
+            }
+            Example::Assembly(architecture) => (architecture, SourceLanguage::Assembly),
+        };
+        if language != self.language {
+            self.language = language;
+            self.selected_frame = 0;
+            self.machine_layout = cmodel::MachineLayout::default();
+            if !PanelId::all(language).contains(&self.compact_tab) {
+                self.compact_tab = PanelId::Source;
+            }
+            self.refresh_menus(cx);
+        }
+        if architecture != self.architecture {
+            self.architecture = architecture;
+            self.reset_memory_view(window, cx);
+        }
         self.replace_with_example(window, cx);
+    }
+    fn reset_memory_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.memory_base = if self.architecture == Architecture::Vole {
+            0
+        } else {
+            0x1000
+        };
+        self.selected = self.memory_base;
+        self.selection_len = 1;
+        self.edit_target = EditTarget::Memory(self.memory_base);
+        let text = format!(
+            "{:0width$X}",
+            self.memory_base,
+            width = self.architecture.address_digits()
+        );
+        self.address_input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
     }
     fn replace_with_example(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let source = match self.language {
@@ -961,31 +1105,14 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if language == self.language
-            || language == SourceLanguage::C && self.architecture == Architecture::Vole
-            || self.view.state == RunState::Running
-        {
+        if language == self.language {
             return;
         }
-        if self.confirm_discard(DiscardOperation::Language(language), window, cx) {
-            return;
-        }
-        self.apply_language(language, window, cx);
-    }
-    fn apply_language(
-        &mut self,
-        language: SourceLanguage,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.language = language;
-        self.example_index = 0;
-        self.selected_frame = 0;
-        self.machine_layout = cmodel::MachineLayout::default();
-        if language == SourceLanguage::Assembly && self.compact_tab == CompactTab::Variables {
-            self.compact_tab = CompactTab::Source;
-        }
-        self.replace_with_example(window, cx);
+        let example = match language {
+            SourceLanguage::C => Example::C(0),
+            SourceLanguage::Assembly => Example::Assembly(self.architecture),
+        };
+        self.open_example(example, window, cx);
     }
     fn set_optimization(&mut self, optimization: Optimization, cx: &mut Context<Self>) {
         if self.settings.optimization == optimization {
@@ -1004,42 +1131,28 @@ impl Workbench {
         }
         cx.notify();
     }
+    /// Assembly is written for one instruction set, so a new target opens its
+    /// example. C is portable and is rebuilt for the new target; choosing VOLE
+    /// from C opens VOLE assembly because VOLE has no C compiler.
     fn choose_architecture(
         &mut self,
         architecture: Architecture,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if architecture == self.architecture {
-            self.architecture_menu = false;
-            cx.notify();
+        self.architecture_menu = false;
+        cx.notify();
+        if architecture == self.architecture || self.view.state == RunState::Running {
             return;
         }
-        if architecture == Architecture::Vole && self.language == SourceLanguage::C {
+        if self.language == SourceLanguage::Assembly || architecture == Architecture::Vole {
+            self.open_example(Example::Assembly(architecture), window, cx);
             return;
         }
         self.architecture = architecture;
-        self.architecture_menu = false;
-        // Keep source when changing a target. The user chooses whether to load its example.
         let command = self.build_command(self.source(cx));
         self.send(command, cx);
-        self.memory_base = if architecture == Architecture::Vole {
-            0
-        } else {
-            0x1000
-        };
-        self.selected = self.memory_base;
-        self.address_input.update(cx, |input, cx| {
-            input.set_value(
-                format!(
-                    "{:0width$X}",
-                    self.memory_base,
-                    width = architecture.address_digits()
-                ),
-                window,
-                cx,
-            )
-        });
+        self.reset_memory_view(window, cx);
     }
     fn select_instruction(&mut self, address: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = address;
@@ -1087,8 +1200,8 @@ impl Workbench {
             _ => 1,
         };
         self.edit_error = None;
-        if self.compact_tab == CompactTab::Variables {
-            self.compact_tab = CompactTab::Memory;
+        if self.compact_tab == PanelId::Variables {
+            self.compact_tab = PanelId::Memory;
         }
         self.set_edit_value(window, cx);
         cx.notify();
@@ -1107,8 +1220,8 @@ impl Workbench {
             .unwrap_or(self.architecture.bits());
         self.edit_target = EditTarget::Register(name, bits);
         self.edit_error = None;
-        if self.compact_tab == CompactTab::Variables {
-            self.compact_tab = CompactTab::Registers;
+        if self.compact_tab == PanelId::Variables {
+            self.compact_tab = PanelId::Registers;
         }
         self.set_edit_value(window, cx);
         cx.notify();
@@ -1121,9 +1234,7 @@ impl Workbench {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.compact_tab != CompactTab::Source {
-            self.compact_tab = CompactTab::Source;
-        }
+        self.compact_tab = PanelId::Source;
         self.editor.update(cx, |state, cx| {
             state.set_cursor_position(
                 Position::new(
@@ -1311,10 +1422,7 @@ impl Workbench {
             if confirm.await == Ok(1) {
                 let _ = this.update_in(cx, |this, window, cx| match operation {
                     DiscardOperation::Open => this.open_file(cx),
-                    DiscardOperation::Example => this.replace_with_example(window, cx),
-                    DiscardOperation::Language(language) => {
-                        this.apply_language(language, window, cx)
-                    }
+                    DiscardOperation::Example(example) => this.apply_example(example, window, cx),
                     DiscardOperation::Close => window.remove_window(),
                     DiscardOperation::Quit => cx.quit(),
                 });
@@ -1389,7 +1497,10 @@ impl Workbench {
             snapshot,
         } = document;
         self.architecture = architecture;
-        self.language = language;
+        if language != self.language {
+            self.language = language;
+            self.refresh_menus(cx);
+        }
         // Plain source files keep the current compiler settings.
         if let Some(settings) = settings {
             self.settings = settings;
@@ -1397,8 +1508,8 @@ impl Workbench {
         self.selected_frame = 0;
         self.expanded.clear();
         self.breakpoint_note = None;
-        if language == SourceLanguage::Assembly && self.compact_tab == CompactTab::Variables {
-            self.compact_tab = CompactTab::Source;
+        if !PanelId::all(language).contains(&self.compact_tab) {
+            self.compact_tab = PanelId::Source;
         }
         self.saved_source = source.clone();
         self.last_source = source.clone();
@@ -1415,7 +1526,7 @@ impl Workbench {
         self.selection_len = 1;
         let editor = self.editor.clone();
         let replacement = source.clone();
-        self.pending_layout = layout;
+        self.document_layout = layout.unwrap_or_default();
         if let Some(handle) = cx.windows().first().copied() {
             let _ = handle.update(cx, |_, window, cx| {
                 editor.update(cx, |state, cx| state.set_value(replacement, window, cx));
@@ -1505,25 +1616,7 @@ impl Workbench {
                 snapshot.trace.clear();
             }
         }
-        if let Some(layout) = self.pending_layout.as_ref() {
-            project.layout = layout.clone();
-        } else {
-            for (state, destination) in [
-                (&self.split_source, &mut project.layout.source_fraction),
-                (&self.split_vertical, &mut project.layout.top_fraction),
-            ] {
-                let sizes = state.read(cx).sizes();
-                if sizes.len() >= 2 {
-                    let total = f32::from(sizes[0] + sizes[1]);
-                    if total > 0. {
-                        *destination = (f32::from(sizes[0]) / total).clamp(0.15, 0.85);
-                    }
-                }
-            }
-            if let Some(width) = self.split_main.read(cx).sizes().get(1) {
-                project.layout.inspector_width = f32::from(*width).clamp(180., 600.);
-            }
-        }
+        project.layout = self.document_layout.clone();
         let existing = if force_picker {
             None
         } else {
@@ -1602,7 +1695,9 @@ Each variable shows where it lives, such as [x29\u{2212}4] for a stack slot, x0 
 
 C uses a freestanding runtime: #include <vole.h> for output, printf, puts, memset, memcpy and strlen. There is no heap, input, files or floating point. -O0 keeps every variable in memory; -O1 optimizes, so some values become unavailable.
 
-Save .voleproject documents to keep the source, target, compiler settings, breakpoints and current machine state."
+Save .voleproject documents to keep the source, target, compiler settings, breakpoints and current machine state.
+
+Hide a panel with its × and show it again from Panels. Drag a panel by its title to move it, and drag the gaps between panels to resize them. The layout is saved automatically."
         } else {
             "Assemble: Ctrl/Command+Enter. Run or pause: F5. Step: F10. Reverse: Shift+F10. Breakpoint at source line: F9. Fullscreen: F11.
 
@@ -1610,7 +1705,9 @@ Select an instruction to jump to its source and memory. Select a memory byte or 
 
 VOLE uses the SimpSim extended profile. ARM and x86 currently execute the supported scalar teaching subset. Unsupported instructions stop with a fault. Simulated instructions are counted, not hardware cycles.
 
-Save .voleproject documents to preserve source, target, breakpoints, pane sizes and current machine state. Open .bin/.hex to inspect machine bytes. Export writes the assembled image."
+Save .voleproject documents to preserve source, target, breakpoints and current machine state.
+
+Hide a panel with its × and show it again from Panels. Drag a panel by its title to move it, and drag the gaps between panels to resize them. The layout is saved automatically. Open .bin/.hex to inspect machine bytes. Export writes the assembled image."
         };
         drop(window.prompt(
             PromptLevel::Info,
@@ -1620,13 +1717,37 @@ Save .voleproject documents to preserve source, target, breakpoints, pane sizes 
             cx,
         ));
     }
-    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
-        self.zoom = (self.zoom + 0.1).min(2.0);
+    fn set_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
+        // Round to whole percents so repeated steps do not drift.
+        let zoom = ((zoom * 10.).round() / 10.).clamp(Preferences::MIN_ZOOM, Preferences::MAX_ZOOM);
+        self.zoom = zoom;
+        self.preferences.zoom = zoom;
+        self.layout_dirty = true;
         cx.notify();
     }
+    fn zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_zoom(self.zoom + 0.1, cx);
+    }
     fn zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
-        self.zoom = (self.zoom - 0.1).max(0.8);
-        cx.notify();
+        self.set_zoom(self.zoom - 0.1, cx);
+    }
+    fn reset_layout_action(&mut self, _: &ResetLayout, _: &mut Window, cx: &mut Context<Self>) {
+        self.reset_layout(cx);
+    }
+    fn toggle_panel(&mut self, action: &TogglePanel, _: &mut Window, cx: &mut Context<Self>) {
+        if PanelId::all(self.language).contains(&action.panel) {
+            let language = self.language;
+            self.preferences.dock_mut(language).toggle(action.panel);
+            self.layout_changed(cx);
+        }
+    }
+    /// Rebuild the native menu bar: panel check marks follow the layout of
+    /// the current language.
+    fn refresh_menus(&self, cx: &mut App) {
+        cx.set_menus(app_menus(
+            self.language,
+            self.preferences.dock(self.language),
+        ));
     }
     fn fullscreen(&mut self, _: &Fullscreen, window: &mut Window, _: &mut Context<Self>) {
         window.toggle_fullscreen();
@@ -1839,6 +1960,40 @@ impl Workbench {
         )
         .child(div().flex_1())
         .child(
+            self.dropdown(
+                Button::new("panels")
+                    .ghost()
+                    .label("Panels")
+                    .tooltip("Show, hide or reset panels")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.panel_menu = !this.panel_menu;
+                        this.example_menu_open = false;
+                        cx.notify();
+                    })),
+                self.panel_menu,
+                || self.panels_menu(cx).into_any_element(),
+            ),
+        )
+        .when(!cfg!(target_os = "macos"), |bar| {
+            // macOS lists examples in the menu bar instead.
+            bar.child(
+                self.dropdown(
+                    Button::new("examples")
+                        .ghost()
+                        .label("Examples")
+                        .tooltip("Open a built-in C or assembly program")
+                        .disabled(running)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.example_menu_open = !this.example_menu_open;
+                            this.panel_menu = false;
+                            cx.notify();
+                        })),
+                    self.example_menu_open,
+                    || self.examples_menu(cx),
+                ),
+            )
+        })
+        .child(
             Button::new("open")
                 .ghost()
                 .label("Open")
@@ -1865,60 +2020,93 @@ impl Workbench {
                 .on_click(cx.listener(|this, _, w, cx| this.save(&Save, w, cx))),
         )
     }
-    fn example_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        deferred(
-            anchored()
-                .anchor(Anchor::BottomRight)
-                .snap_to_window_with_margin(px(8.))
-                .child(
-                    div()
-                        .id("example-menu")
-                        .role(Role::Menu)
-                        .aria_label("C examples")
-                        .occlude()
-                        .mb(px(34.))
-                        .w(px(220.))
-                        .p(px(6.))
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .bg(rgb(SURFACE))
-                        .border_1()
-                        .border_color(rgb(DIVIDER))
-                        .rounded(px(6.))
-                        .children(
-                            vole_c::EXAMPLES
-                                .iter()
-                                .enumerate()
-                                .map(|(index, (name, _))| {
-                                    div()
-                                        .id(("c-example", index))
-                                        .role(Role::MenuItem)
-                                        .aria_label(format!("Load example {name}"))
-                                        .px(px(10.))
-                                        .py(px(5.))
-                                        .rounded(px(4.))
-                                        .font_family(MONO)
-                                        .text_size(px(13.))
-                                        .text_color(rgb(if index == self.example_index {
-                                            READ
-                                        } else {
-                                            INK
-                                        }))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(rgb(0x2b3b51)))
-                                        .child(*name)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.choose_example(index, window, cx)
-                                        }))
-                                }),
-                        )
-                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.example_menu = false;
-                            cx.notify();
-                        })),
-                ),
-        )
+    /// A toolbar button with a dropdown that opens below its right edge.
+    fn dropdown(&self, button: Button, open: bool, menu: impl FnOnce() -> AnyElement) -> Div {
+        div().relative().child(button).when(open, |anchor| {
+            anchor.child(deferred(
+                div()
+                    .absolute()
+                    .top(relative(1.))
+                    .right_0()
+                    .mt(px(6.))
+                    .child(menu()),
+            ))
+        })
+    }
+    /// In-app Examples menu for platforms without a native menu bar.
+    fn examples_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let item = |id: ElementId,
+                    label: String,
+                    current: bool,
+                    example: Example,
+                    cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .role(Role::MenuItem)
+                .aria_label(format!("Open example {label}"))
+                .px(px(10.))
+                .py(px(5.))
+                .rounded(px(4.))
+                .text_size(px(13.))
+                .text_color(rgb(if current { READ } else { INK }))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x2b3b51)))
+                .child(label)
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open_example(example, window, cx)),
+                )
+        };
+        let c_mode = self.language == SourceLanguage::C;
+        let mut c_column = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w(px(190.))
+            .child(div().px(px(10.)).py(px(4.)).child(note("C programs")));
+        for (index, (name, _)) in vole_c::EXAMPLES.iter().enumerate() {
+            c_column = c_column.child(item(
+                ("example-c", index).into(),
+                example_title(name),
+                c_mode && index == self.example_index,
+                Example::C(index),
+                cx,
+            ));
+        }
+        let mut assembly_column = div()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .w(px(210.))
+            .child(div().px(px(10.)).py(px(4.)).child(note("Assembly")));
+        for architecture in Architecture::ALL {
+            assembly_column = assembly_column.child(item(
+                (ElementId::from("example-assembly"), architecture.id()).into(),
+                architecture.name().to_string(),
+                !c_mode && architecture == self.architecture,
+                Example::Assembly(architecture),
+                cx,
+            ));
+        }
+        div()
+            .id("examples-menu")
+            .role(Role::Menu)
+            .aria_label("Examples")
+            .occlude()
+            .p(px(6.))
+            .flex()
+            .gap(px(6.))
+            .bg(rgb(SURFACE))
+            .border_1()
+            .border_color(rgb(DIVIDER))
+            .rounded(px(6.))
+            .child(c_column)
+            .child(div().w(px(1.)).bg(rgb(DIVIDER)))
+            .child(assembly_column)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.example_menu_open = false;
+                cx.notify();
+            }))
+            .into_any_element()
     }
     /// Two-segment Assembly / C switch. C is unavailable for the VOLE machine.
     fn language_toggle(&self, cx: &mut Context<Self>) -> Div {
@@ -1938,11 +2126,13 @@ impl Workbench {
                 .when(selected, |b| b.bg(rgb(SURFACE)).text_color(rgb(INK)))
                 .when(!selected, |b| b.text_color(rgb(MUTED)))
                 .tooltip(match language {
-                    SourceLanguage::C if vole => "C targets ARM32, ARM64, x86 and x64",
+                    SourceLanguage::C if vole => {
+                        "Write C. VOLE has no C compiler, so this switches to ARM64"
+                    }
                     SourceLanguage::C => "Write C and debug it line by line",
                     SourceLanguage::Assembly => "Write assembly for the selected target",
                 })
-                .disabled(running || !selected && language == SourceLanguage::C && vole)
+                .disabled(running)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.choose_language(language, window, cx)
                 }))
@@ -2013,7 +2203,7 @@ impl Workbench {
             format!("{byte_count} code bytes assembled")
         };
         pane()
-            .child(heading(if c_mode { "C source" } else { "Assembly" }, name))
+            .child(self.panel_heading(PanelId::Source, name, cx))
             .child(
                 div().min_h_0().flex_1().overflow_hidden().child(
                     Editor::new(&self.editor)
@@ -2039,29 +2229,7 @@ impl Workbench {
                     .gap(px(8.))
                     .px(px(20.))
                     .py(px(8.))
-                    .child(note(footer))
-                    .child(
-                        div()
-                            .relative()
-                            .child(
-                                Button::new("example")
-                                    .ghost()
-                                    .small()
-                                    .label(if c_mode { "Examples" } else { "Load example" })
-                                    .disabled(self.view.state == RunState::Running)
-                                    .on_click(cx.listener(move |this, _, w, cx| {
-                                        if c_mode {
-                                            this.example_menu = !this.example_menu;
-                                            cx.notify();
-                                        } else {
-                                            this.load_example(&LoadExample, w, cx)
-                                        }
-                                    })),
-                            )
-                            .when(c_mode && self.example_menu, |anchor| {
-                                anchor.child(self.example_menu(cx))
-                            }),
-                    ),
+                    .child(note(footer)),
             )
             .when(!self.view.diagnostics.is_empty(), |panel| {
                 panel.child(self.diagnostics_list(cx))
@@ -2074,40 +2242,23 @@ impl Workbench {
         }
         let count = self.view.disassembly.len();
         pane()
-            .child(heading(
-                "Instructions",
-                "Scroll · address / bytes / assembly",
-            ))
+            .child(self.panel_heading(PanelId::Code, "Address / bytes / assembly", cx))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(12.))
                     .px(px(20.))
-                    .h(px(28.))
-                    .text_size(px(12.))
+                    .h(px(28. * self.zoom))
+                    .text_size(px(12. * self.zoom))
                     .text_color(rgb(MUTED))
-                    .child(div().w(px(22.)).child(""))
+                    .child(div().w(px(22.)).flex_none().child(""))
                     .child(
                         div()
-                            .w(px(if self.architecture == Architecture::Vole {
-                                48.
-                            } else if self.architecture.bits() == 32 {
-                                82.
-                            } else {
-                                154.
-                            }))
+                            .w(px(self.instruction_address_width()))
                             .child("Address"),
                     )
-                    .child(
-                        div()
-                            .w(px(if self.architecture == Architecture::Vole {
-                                78.
-                            } else {
-                                130.
-                            }))
-                            .child("Bytes"),
-                    )
+                    .child(div().w(px(self.instruction_bytes_width())).child("Bytes"))
                     .child("Assembly"),
             )
             .child(
@@ -2173,13 +2324,7 @@ impl Workbench {
             )
             .child(
                 div()
-                    .w(px(if self.architecture == Architecture::Vole {
-                        48.
-                    } else if self.architecture.bits() == 32 {
-                        82.
-                    } else {
-                        154.
-                    }))
+                    .w(px(self.instruction_address_width()))
                     .flex_none()
                     .child(format!(
                         "{address:0width$X}",
@@ -2188,11 +2333,7 @@ impl Workbench {
             )
             .child(
                 div()
-                    .w(px(if self.architecture == Architecture::Vole {
-                        78.
-                    } else {
-                        130.
-                    }))
+                    .w(px(self.instruction_bytes_width()))
                     .flex_none()
                     .min_w_0()
                     .overflow_hidden()
@@ -2416,7 +2557,7 @@ impl Workbench {
     fn registers_panel(&self, cx: &mut Context<Self>) -> Div {
         let Some(snapshot) = self.view.snapshot.as_ref() else {
             return pane()
-                .child(heading("Registers", ""))
+                .child(self.panel_heading(PanelId::Registers, "", cx))
                 .child(
                     div()
                         .p(px(20.))
@@ -2432,12 +2573,14 @@ impl Workbench {
         let c_mode = self.language == SourceLanguage::C;
         // Two 64-bit columns need about 370px; narrower inspectors and compact
         // tabs keep one column instead of clipping values.
-        let inspector_width = self
-            .split_main
-            .read(cx)
-            .sizes()
-            .get(1)
-            .map_or(380., |w| f32::from(*w));
+        let inspector_width = if self.compact {
+            self.viewport_width
+        } else {
+            self.preferences
+                .dock(self.language)
+                .width_fraction(PanelId::Registers)
+                .map_or(380., |share| share * self.viewport_width)
+        } / self.zoom.max(1.);
         let wide_enough = self.architecture.bits() < 64 || inspector_width >= 370.;
         let columns = if self.architecture == Architecture::Vole || c_mode && wide_enough {
             2
@@ -2551,9 +2694,10 @@ impl Workbench {
             rows.push(row);
         }
         pane()
-            .child(heading(
-                "Registers",
+            .child(self.panel_heading(
+                PanelId::Registers,
                 format!("{}-bit values", self.architecture.bits()),
+                cx,
             ))
             .child(
                 div()
@@ -2623,7 +2767,7 @@ impl Workbench {
                     }),
             )
     }
-    fn explanation_panel(&self) -> Div {
+    fn explanation_panel(&self, cx: &mut Context<Self>) -> Div {
         let instruction = self.view.current_instruction.as_ref();
         let snapshot = self.view.snapshot.as_ref();
         let mut content = div().flex().flex_col().gap(px(12.)).p(px(20.));
@@ -2677,30 +2821,30 @@ impl Workbench {
                 "Instruction effects appear after assembly."
             }));
         }
-        div()
-            .flex()
-            .flex_col()
-            .flex_none()
-            .border_t_1()
-            .border_color(rgb(DIVIDER))
-            .child(heading(
+        pane()
+            .child(self.panel_heading(
+                PanelId::Explanation,
                 if self.view.dirty {
-                    "Previous executable"
-                } else {
-                    "What happens next"
-                },
-                if self.view.dirty {
-                    "Source changed"
+                    "Previous executable · source changed"
                 } else {
                     "Preview"
                 },
+                cx,
             ))
-            .child(content)
+            .child(
+                div()
+                    .id("explanation-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(content),
+            )
     }
-    fn trace_panel(&self) -> Div {
+    fn trace_panel(&self, cx: &mut Context<Self>) -> Div {
         let snapshot = self.view.snapshot.as_ref();
         let count = snapshot.map(|s| s.steps).unwrap_or(0);
-        let mut panel = pane().child(heading("Trace", format!("{count} steps")));
+        let mut panel =
+            pane().child(self.panel_heading(PanelId::Trace, format!("{count} steps"), cx));
         let records = snapshot
             .map(|s| s.trace.iter().rev().take(40).collect::<Vec<_>>())
             .unwrap_or_default();
@@ -2791,12 +2935,15 @@ impl Workbench {
             .py(px(12.))
             .border_b_1()
             .border_color(rgb(DIVIDER))
-            .child(
+            .child(if compact {
                 div()
                     .text_size(px(16.))
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Main memory"),
-            )
+                    .child(self.panel_title(PanelId::Memory))
+                    .into_any_element()
+            } else {
+                self.panel_handle(PanelId::Memory, cx).into_any_element()
+            })
             .child(note(if self.architecture == Architecture::Vole {
                 "256 bytes"
             } else {
@@ -2848,6 +2995,8 @@ impl Workbench {
             );
         if compact {
             header = header.child(note("Scroll to inspect all memory columns"));
+        } else {
+            header = header.child(self.hide_button(PanelId::Memory, cx));
         }
         let table = div()
             .size_full()
@@ -2867,33 +3016,27 @@ impl Workbench {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(29.))
+                    .h(px(29. * self.zoom))
                     .px(px(12.))
                     .font_family(MONO)
-                    .text_size(px(11.))
+                    .text_size(px(11. * self.zoom))
                     .text_color(rgb(MUTED))
                     .child(
                         div()
-                            .w(px(if digits == 2 {
-                                58.
-                            } else if digits == 8 {
-                                95.
-                            } else {
-                                160.
-                            }))
+                            .w(px(self.memory_address_width()))
                             .flex_none()
                             .child("Address"),
                     )
                     .children((0..16).map(|index| {
                         div()
                             .flex_1()
-                            .min_w(px(24.))
+                            .min_w(px(24. * self.zoom))
                             .text_center()
                             .child(format!("{index:X}"))
                     }))
                     .child(
                         div()
-                            .w(px(138.))
+                            .w(px(self.memory_ascii_width()))
                             .flex_none()
                             .pl(px(14.))
                             .font_family(SANS)
@@ -2926,7 +3069,7 @@ impl Workbench {
                             .min_w_0()
                             .min_h_0()
                             .overflow_x_scroll()
-                            .child(table.min_w(px(if digits == 16 { 730. } else { 620. }))),
+                            .child(table.min_w(px(self.memory_table_width()))),
                     )
                     .when(!compact, |row| {
                         row.child(
@@ -2941,6 +3084,40 @@ impl Workbench {
             .when(compact, |panel| {
                 panel.child(self.edit_inspector(cx).h(px(160.)))
             })
+    }
+    /// Column widths grow with the code and data size so zoomed text fits.
+    fn memory_address_width(&self) -> f32 {
+        let base = match self.architecture.address_digits() {
+            2 => 58.,
+            8 => 95.,
+            _ => 160.,
+        };
+        base * self.zoom
+    }
+    /// Sixteen monospace characters plus the column's left padding.
+    fn memory_ascii_width(&self) -> f32 {
+        14. + 16. * 11. * 0.62 * self.zoom + 8.
+    }
+    fn memory_table_width(&self) -> f32 {
+        24. + self.memory_address_width() + 16. * 24. * self.zoom + self.memory_ascii_width()
+    }
+    fn instruction_address_width(&self) -> f32 {
+        let base = if self.architecture == Architecture::Vole {
+            48.
+        } else if self.architecture.bits() == 32 {
+            82.
+        } else {
+            154.
+        };
+        base * self.zoom
+    }
+    fn instruction_bytes_width(&self) -> f32 {
+        let base = if self.architecture == Architecture::Vole {
+            78.
+        } else {
+            130.
+        };
+        base * self.zoom
     }
     fn memory_row(&self, row: usize, cx: &mut Context<Self>) -> Stateful<Div> {
         let digits = self.architecture.address_digits();
@@ -2965,13 +3142,7 @@ impl Workbench {
             .text_size(px(12. * self.zoom))
             .child(
                 div()
-                    .w(px(if digits == 2 {
-                        58.
-                    } else if digits == 8 {
-                        95.
-                    } else {
-                        160.
-                    }))
+                    .w(px(self.memory_address_width()))
                     .flex_none()
                     .text_color(rgb(MUTED))
                     .child(format!("{address:0digits$X}")),
@@ -3011,7 +3182,7 @@ impl Workbench {
                             .unwrap_or_else(|| "unmapped".into())
                     ))
                     .flex_1()
-                    .min_w(px(24.))
+                    .min_w(px(24. * self.zoom))
                     .h(px(17. * self.zoom))
                     .flex()
                     .items_center()
@@ -3053,9 +3224,11 @@ impl Workbench {
         }
         line.child(
             div()
-                .w(px(138.))
+                .w(px(self.memory_ascii_width()))
                 .flex_none()
                 .pl(px(14.))
+                .whitespace_nowrap()
+                .overflow_hidden()
                 .text_size(px(11. * self.zoom))
                 .text_color(rgb(MUTED))
                 .child(inspect::ascii(&bytes)),
@@ -3405,34 +3578,24 @@ impl Focusable for Workbench {
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let width = f32::from(window.viewport_size().width);
-        let height = f32::from(window.viewport_size().height);
+        // The docked layout needs room for two panel columns; below that,
+        // panels become tabs.
         let compact = width < 1150.;
-        if !compact && let Some(layout) = self.pending_layout.take() {
-            // Wait until the groups have measured their current viewport before applying ratios.
-            // A document opened in compact mode keeps these preferences until the groups return.
-            let entity = cx.entity();
-            window.defer(cx, move |window, cx| {
-                entity.update(cx, |workbench, cx| {
-                    for (state, fraction) in [
-                        (&workbench.split_source, layout.source_fraction),
-                        (&workbench.split_vertical, layout.top_fraction),
-                    ] {
-                        let total = state.read(cx).sizes().iter().copied().sum::<Pixels>();
-                        if total > px(0.) {
-                            state.update(cx, |state, cx| {
-                                state.resize_panel(0, total * fraction, window, cx)
-                            });
-                        }
-                    }
-                    workbench.split_main.update(cx, |state, cx| {
-                        state.resize_panel(1, px(layout.inspector_width), window, cx)
-                    });
-                    cx.notify();
-                });
-            });
-        }
+        self.compact = compact;
+        self.viewport_width = width;
         let c_mode = self.language == SourceLanguage::C;
         let content = if compact {
+            let dock = self.preferences.dock(self.language);
+            // Hidden panels stay hidden here too, unless every panel is hidden.
+            let mut entries = dock.visible();
+            if entries.is_empty() {
+                entries = PanelId::all(self.language).to_vec();
+            }
+            let tab = if entries.contains(&self.compact_tab) {
+                self.compact_tab
+            } else {
+                entries[0]
+            };
             let mut tabs = div()
                 .flex()
                 .flex_wrap()
@@ -3441,153 +3604,33 @@ impl Render for Workbench {
                 .py(px(8.))
                 .border_b_1()
                 .border_color(rgb(DIVIDER));
-            let entries: &[(CompactTab, &str)] = if c_mode {
-                &[
-                    (CompactTab::Source, "C source"),
-                    (CompactTab::Instructions, "Machine code"),
-                    (CompactTab::Variables, "Variables"),
-                    (CompactTab::Memory, "Memory"),
-                    (CompactTab::Registers, "Registers"),
-                    (CompactTab::Trace, "Output"),
-                ]
-            } else {
-                &[
-                    (CompactTab::Source, "Assembly"),
-                    (CompactTab::Instructions, "Instructions"),
-                    (CompactTab::Memory, "Memory"),
-                    (CompactTab::Registers, "Registers"),
-                    (CompactTab::Trace, "Trace"),
-                ]
-            };
-            for &(tab, label) in entries {
+            for id in entries {
+                let label = self.panel_title(id);
                 tabs = tabs.child(
                     Button::new((ElementId::from("compact-tab"), label))
                         .ghost()
                         .small()
                         .label(label)
-                        .when(self.compact_tab == tab, |button| button.primary())
+                        .when(tab == id, |button| button.primary())
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.compact_tab = tab;
+                            this.compact_tab = id;
                             cx.notify();
                         })),
                 );
             }
-            let tab = if !c_mode && self.compact_tab == CompactTab::Variables {
-                CompactTab::Source
+            let panel = if tab == PanelId::Registers
+                && matches!(self.edit_target, EditTarget::Register(_, _))
+            {
+                pane()
+                    .child(self.registers_panel(cx).flex_1().min_h_0())
+                    .child(self.edit_inspector(cx).h(px(160.)).flex_none())
+                    .into_any_element()
             } else {
-                self.compact_tab
-            };
-            let panel = match tab {
-                CompactTab::Source => self.source_panel(cx),
-                CompactTab::Instructions => self.instructions_panel(cx),
-                CompactTab::Variables => pane()
-                    .child(self.call_stack_panel(cx).h_auto().flex_none())
-                    .child(
-                        self.variables_panel(cx)
-                            .flex_1()
-                            .min_h_0()
-                            .border_t_1()
-                            .border_color(rgb(DIVIDER)),
-                    ),
-                CompactTab::Memory => self.memory_panel(true, cx),
-                CompactTab::Registers => {
-                    let panel = pane().child(self.registers_panel(cx).flex_1().min_h_0());
-                    if matches!(self.edit_target, EditTarget::Register(_, _)) {
-                        panel.child(self.edit_inspector(cx).h(px(160.)).flex_none())
-                    } else {
-                        panel
-                    }
-                }
-                CompactTab::Trace if c_mode => self.output_panel(),
-                CompactTab::Trace => self.trace_panel(),
+                self.panel_content(tab, cx)
             };
             pane().child(tabs).child(panel).into_any_element()
         } else {
-            let left = v_resizable("source-memory")
-                .with_state(&self.split_vertical)
-                .child(
-                    resizable_panel()
-                        .size(px(if c_mode { 470. } else { 390. }))
-                        .size_range(px(220.)..px(1200.))
-                        .child(
-                            h_resizable("source-instructions")
-                                .with_state(&self.split_source)
-                                .child(
-                                    resizable_panel()
-                                        .size(px(if c_mode { 500. } else { 460. }))
-                                        .size_range(px(260.)..px(1200.))
-                                        .child(self.source_panel(cx)),
-                                )
-                                .child(
-                                    resizable_panel()
-                                        .size_range(px(350.)..px(1800.))
-                                        .child(self.instructions_panel(cx)),
-                                ),
-                        ),
-                )
-                .child(
-                    resizable_panel()
-                        .size_range(px(220.)..px(1200.))
-                        .child(self.memory_panel(false, cx)),
-                );
-            let right = if c_mode {
-                pane()
-                    .child(self.call_stack_panel(cx).h_auto().flex_none())
-                    .child(
-                        self.variables_panel(cx)
-                            .flex_1()
-                            .min_h(px(140.))
-                            .border_t_1()
-                            .border_color(rgb(DIVIDER)),
-                    )
-                    .child(
-                        self.registers_panel(cx)
-                            .h(px(((height - 260.) * 0.36).clamp(170., 300.)))
-                            .flex_none()
-                            .border_t_1()
-                            .border_color(rgb(DIVIDER)),
-                    )
-                    .child(
-                        self.output_panel()
-                            .h(px(if height < 860. { 112. } else { 132. }))
-                            .flex_none()
-                            .border_t_1()
-                            .border_color(rgb(DIVIDER)),
-                    )
-            } else {
-                pane()
-                    .child(
-                        self.registers_panel(cx)
-                            .h(px(if self.architecture == Architecture::Vole {
-                                330.
-                            } else {
-                                350.
-                            }))
-                            .flex_none(),
-                    )
-                    .child(self.explanation_panel())
-                    .child(self.trace_panel())
-            };
-            h_resizable("main-inspector")
-                .with_state(&self.split_main)
-                .child(
-                    resizable_panel()
-                        .size_range(px(600.)..px(2400.))
-                        .child(left),
-                )
-                .child(
-                    resizable_panel()
-                        .size(px(if c_mode {
-                            380.
-                        } else if self.architecture.bits() == 64 {
-                            360.
-                        } else {
-                            320.
-                        }))
-                        .size_range(px(275.)..px(600.))
-                        .child(right),
-                )
-                .into_any_element()
+            self.dock_view(cx)
         };
         let mut shell = pane()
             .id("workbench")
@@ -3619,6 +3662,9 @@ impl Render for Workbench {
             .on_action(cx.listener(Self::toggle_breakpoint))
             .on_action(cx.listener(Self::zoom_in))
             .on_action(cx.listener(Self::zoom_out))
+            .on_action(cx.listener(Self::open_example_action))
+            .on_action(cx.listener(Self::toggle_panel))
+            .on_action(cx.listener(Self::reset_layout_action))
             .on_action(cx.listener(Self::fullscreen))
             .on_action(cx.listener(Self::quit))
             .child(self.toolbar(compact, cx).w(px(width)).max_w(px(width)))
@@ -3648,14 +3694,13 @@ impl Render for Workbench {
                 .border_color(rgb(DIVIDER))
                 .rounded(px(6.))
                 .children(Architecture::ALL.into_iter().map(|architecture| {
-                    let unavailable = c_mode && architecture == Architecture::Vole;
+                    let to_assembly = c_mode && architecture == Architecture::Vole;
                     Button::new((ElementId::from("architecture"), architecture.id()))
                         .ghost()
                         .label(architecture.name())
-                        .disabled(unavailable)
-                        .when(unavailable, |button| {
+                        .when(to_assembly, |button| {
                             button.tooltip(
-                                "VOLE runs assembly only. C targets ARM32, ARM64, x86 and x64.",
+                                "VOLE runs assembly only, so this opens the VOLE assembly example.",
                             )
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -3787,6 +3832,101 @@ fn load_document(
     Ok(document)
 }
 
+/// The native menu bar. View lists the current language's panels with a
+/// check mark on each visible one; Examples opens any built-in program.
+fn app_menus(language: SourceLanguage, dock: &dock::Dock) -> Vec<Menu> {
+    let mut view = vec![
+        MenuItem::action("Increase code and data size", ZoomIn),
+        MenuItem::action("Decrease code and data size", ZoomOut),
+        MenuItem::separator(),
+    ];
+    view.extend(PanelId::all(language).iter().map(|&panel| {
+        MenuItem::action(panel.title(language), TogglePanel { panel })
+            .checked(dock.is_visible(panel))
+    }));
+    view.push(MenuItem::separator());
+    view.push(MenuItem::action("Reset panel layout", ResetLayout));
+    let c_examples = vole_c::EXAMPLES
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| {
+            MenuItem::action(
+                example_title(name),
+                OpenExample {
+                    example: Example::C(index),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    let assembly_examples = Architecture::ALL
+        .into_iter()
+        .map(|architecture| {
+            MenuItem::action(
+                architecture.name(),
+                OpenExample {
+                    example: Example::Assembly(architecture),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    vec![
+        Menu::new("Vole").items([
+            MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            MenuItem::action("Quit Vole", Quit),
+        ]),
+        Menu::new("File").items([
+            MenuItem::action("Open…", Open),
+            MenuItem::action("Save", Save),
+            MenuItem::action("Save as…", SaveAs),
+            MenuItem::action("Export machine bytes…", ExportBytes),
+        ]),
+        Menu::new("Edit").items([
+            MenuItem::action("Undo", gpui_kit::component::input::Undo),
+            MenuItem::action("Redo", gpui_kit::component::input::Redo),
+            MenuItem::separator(),
+            MenuItem::action("Cut", gpui_kit::component::input::Cut),
+            MenuItem::action("Copy", gpui_kit::component::input::Copy),
+            MenuItem::action("Paste", gpui_kit::component::input::Paste),
+            MenuItem::action("Select all", gpui_kit::component::input::SelectAll),
+        ]),
+        Menu::new("Examples").items([
+            MenuItem::submenu(Menu::new("C programs").items(c_examples)),
+            MenuItem::submenu(Menu::new("Assembly").items(assembly_examples)),
+            MenuItem::separator(),
+            MenuItem::action("Reload current example", LoadExample),
+        ]),
+        Menu::new("Run").items([
+            MenuItem::action("Assemble or compile", Assemble),
+            MenuItem::action("Run / Pause", RunPause),
+            MenuItem::action("Step", Step),
+            MenuItem::action("Step over C line", StepOver),
+            MenuItem::action("Step into C line", StepInto),
+            MenuItem::action("Step out of C function", StepOut),
+            MenuItem::action("Reverse step", ReverseStep),
+            MenuItem::action("Reset", Reset),
+            MenuItem::separator(),
+            MenuItem::action("Toggle breakpoint", ToggleBreakpoint),
+        ]),
+        Menu::new("View").items(view),
+        Menu::new("Window").items([MenuItem::action("Toggle fullscreen", Fullscreen)]),
+        Menu::new("Help").items([MenuItem::action("Using Vole", ShowHelp)]),
+    ]
+}
+
+/// "nested_calls.c" reads as "Nested calls" in menus.
+fn example_title(name: &str) -> String {
+    let stem = name
+        .strip_suffix(".c")
+        .unwrap_or(name)
+        .replace(['_', '-'], " ");
+    let mut chars = stem.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<(), vole_core::SimError> {
     let parent = path
         .parent()
@@ -3893,15 +4033,7 @@ fn main() {
         .windows(2)
         .find(|a| a[0] == "--open")
         .map(|a| PathBuf::from(&a[1]));
-    let initial_tab = value("--tab").and_then(|tab| match tab.as_str() {
-        "source" => Some(CompactTab::Source),
-        "machine" | "instructions" => Some(CompactTab::Instructions),
-        "variables" => Some(CompactTab::Variables),
-        "memory" => Some(CompactTab::Memory),
-        "registers" => Some(CompactTab::Registers),
-        "output" | "trace" => Some(CompactTab::Trace),
-        _ => None,
-    });
+    let initial_tab = value("--tab");
     let application = gpui_platform::application().with_assets(gpui_kit::assets::Assets);
     application.on_reopen(open_main_window);
     application.run(move |cx| {
@@ -3995,48 +4127,10 @@ fn main() {
             KeyBinding::new("down", MemoryDown, Some("Memory")),
             KeyBinding::new(&format!("{primary}-c"), CopyValue, Some("Memory")),
         ]);
-        cx.set_menus([
-            Menu::new("Vole").items([
-                MenuItem::os_submenu("Services", SystemMenuType::Services),
-                MenuItem::separator(),
-                MenuItem::action("Quit Vole", Quit),
-            ]),
-            Menu::new("File").items([
-                MenuItem::action("Open…", Open),
-                MenuItem::action("Save", Save),
-                MenuItem::action("Save as…", SaveAs),
-                MenuItem::action("Export machine bytes…", ExportBytes),
-                MenuItem::separator(),
-                MenuItem::action("Load example", LoadExample),
-            ]),
-            Menu::new("Edit").items([
-                MenuItem::action("Undo", gpui_kit::component::input::Undo),
-                MenuItem::action("Redo", gpui_kit::component::input::Redo),
-                MenuItem::separator(),
-                MenuItem::action("Cut", gpui_kit::component::input::Cut),
-                MenuItem::action("Copy", gpui_kit::component::input::Copy),
-                MenuItem::action("Paste", gpui_kit::component::input::Paste),
-                MenuItem::action("Select all", gpui_kit::component::input::SelectAll),
-            ]),
-            Menu::new("Run").items([
-                MenuItem::action("Assemble or compile", Assemble),
-                MenuItem::action("Run / Pause", RunPause),
-                MenuItem::action("Step", Step),
-                MenuItem::action("Step over C line", StepOver),
-                MenuItem::action("Step into C line", StepInto),
-                MenuItem::action("Step out of C function", StepOut),
-                MenuItem::action("Reverse step", ReverseStep),
-                MenuItem::action("Reset", Reset),
-                MenuItem::separator(),
-                MenuItem::action("Toggle breakpoint", ToggleBreakpoint),
-            ]),
-            Menu::new("View").items([
-                MenuItem::action("Increase code and data size", ZoomIn),
-                MenuItem::action("Decrease code and data size", ZoomOut),
-            ]),
-            Menu::new("Window").items([MenuItem::action("Toggle fullscreen", Fullscreen)]),
-            Menu::new("Help").items([MenuItem::action("Using Vole", ShowHelp)]),
-        ]);
+        cx.set_menus(app_menus(
+            initial_language,
+            &dock::Dock::default_for(initial_language),
+        ));
         open_main_window(cx);
     });
 }
