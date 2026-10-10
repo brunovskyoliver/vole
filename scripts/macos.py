@@ -176,6 +176,7 @@ def build(environment, tools, profile):
         (contents / "Info.plist").write_bytes(plistlib.dumps(plist))
         for name in ["vole", "vole-cli"]:
             shutil.copy2(binaries / name, executable_dir / name)
+        shutil.copy2(ROOT / "packaging/macos/Vole.icns", resource_dir / "Vole.icns")
         for name, tool in tools.items():
             tool_launcher(tool, resource_dir / "toolchain" / name)
         local_env = environment.copy()

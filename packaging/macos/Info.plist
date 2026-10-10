@@ -5,6 +5,7 @@
     <key>CFBundleName</key><string>Vole</string>
     <key>CFBundleDisplayName</key><string>Vole</string>
     <key>CFBundleIdentifier</key><string>dev.vole.Workbench</string>
+    <key>CFBundleIconFile</key><string>Vole</string>
     <key>CFBundleExecutable</key><string>vole</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>

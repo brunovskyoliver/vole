@@ -27,6 +27,7 @@ escaped_destination=${escaped_destination//\`/\\\`}
   printf '[Desktop Entry]\nType=Application\nName=Vole\n'
   printf 'Comment=Assemble and simulate teaching machines\n'
   printf 'Exec="%s/vole"\n' "$escaped_destination"
+  printf 'Icon=%s/vole.png\n' "$destination"
   printf 'Terminal=false\nCategories=Development;Education;\nStartupWMClass=dev.vole.Workbench\n'
 } > "$application_directory/dev.vole.Workbench.desktop"
 printf 'Installed Vole in %s. Open Vole from your application launcher.\n' "$destination"

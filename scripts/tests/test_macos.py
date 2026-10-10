@@ -24,6 +24,7 @@ class MacBuildTests(unittest.TestCase):
         plist = self.root / "packaging/macos/Info.plist"
         plist.parent.mkdir(parents=True)
         plist.write_bytes((macos.ROOT / "packaging/macos/Info.plist").read_bytes())
+        (plist.parent / "Vole.icns").write_bytes(b"icns")
         self.tools = {}
         for name in macos.TOOLS:
             tool = self.root / "LLVM tools" / name
@@ -61,6 +62,7 @@ class MacBuildTests(unittest.TestCase):
         plist = plistlib.loads((app / "Contents/Info.plist").read_bytes())
         self.assertEqual(plist["CFBundleIdentifier"], "dev.vole.Workbench")
         self.assertEqual(plist["CFBundleExecutable"], "vole")
+        self.assertTrue((app / "Contents/Resources" / (plist["CFBundleIconFile"] + ".icns")).is_file())
         self.assertFalse(plist["LSUIElement"])
         self.assertEqual((app / "Contents/MacOS/vole").read_bytes(), b"binary:release:vole")
         self.assertTrue(os.access(app / "Contents/MacOS/vole", os.X_OK))

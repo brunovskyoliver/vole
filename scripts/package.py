@@ -287,6 +287,7 @@ def main():
         plist["CFBundleVersion"] = version
         (package / "Contents").mkdir(parents=True)
         (package / "Contents/Info.plist").write_bytes(plistlib.dumps(plist))
+        copy(ROOT / "packaging/macos/Vole.icns", resources / "Vole.icns")
     else:
         application = destination
         resources = destination
@@ -310,8 +311,10 @@ def main():
     if host == "linux":
         copy(ROOT / "packaging/linux.desktop", destination / "vole.desktop")
         copy(ROOT / "packaging/install-linux.sh", destination / "install.sh")
+        copy(ROOT / "packaging/linux/vole.png", destination / "vole.png")
     elif host == "windows":
         copy(ROOT / "packaging/windows/install.ps1", destination / "install.ps1")
+        copy(ROOT / "packaging/windows/vole.ico", destination / "vole.ico")
     results = {} if args.skip_smoke else smoke(application / ("vole-cli" + suffix), destination)
     if not args.skip_smoke:
         environment = os.environ.copy()

@@ -7325,7 +7325,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vole-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui-kit",
  "gpui-pre",
@@ -7342,7 +7342,7 @@ dependencies = [
 
 [[package]]
 name = "vole-c"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gimli",
  "object",
@@ -7353,7 +7353,7 @@ dependencies = [
 
 [[package]]
 name = "vole-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "vole-core",
@@ -7363,14 +7363,14 @@ dependencies = [
 
 [[package]]
 name = "vole-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "vole-debug"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "vole-c",
  "vole-core",
@@ -7379,7 +7379,7 @@ dependencies = [
 
 [[package]]
 name = "vole-isa-scalar"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "capstone",
  "object",
@@ -7389,14 +7389,14 @@ dependencies = [
 
 [[package]]
 name = "vole-isa-vole"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "vole-core",
 ]
 
 [[package]]
 name = "vole-project"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -7406,7 +7406,7 @@ dependencies = [
 
 [[package]]
 name = "vole-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "tempfile",

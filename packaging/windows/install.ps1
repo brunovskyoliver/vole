@@ -14,6 +14,7 @@ $shortcutPath = Join-Path $shortcutDirectory 'Vole.lnk'
 $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
 $shortcut.TargetPath = Join-Path $destination 'vole.exe'
 $shortcut.WorkingDirectory = $destination
+$shortcut.IconLocation = Join-Path $destination 'vole.ico'
 $shortcut.Description = 'Assemble and simulate teaching machines'
 $shortcut.Save()
 Write-Output "Installed Vole in $destination. Open Vole from the Start menu."
