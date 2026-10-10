@@ -1,75 +1,67 @@
-name: Reviewable native release artifacts
+name: Linux release
 on:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Linux build to, e.g. v0.1.1
+        required: true
 permissions:
-  contents: read
+  contents: write
 jobs:
-  package:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15, macos-15-intel, windows-2022]
-    runs-on: ${{ matrix.os }}
-    # Building Clang from the pinned LLVM source dominates a cold cache.
-    timeout-minutes: 300
+  # ponytail: macOS builds are made locally (make mac-build PROFILE=release);
+  # this only adds the Linux x64 tarball the Homebrew cask installs on Linux.
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     env:
-      CARGO_BUILD_JOBS: 2
-      MACOSX_DEPLOYMENT_TARGET: '13.0'
+      TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7.0.1
-      - uses: actions/setup-python@v7.0.0
         with:
-          python-version: '3.12'
+          ref: ${{ env.TAG }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libssl-dev libfontconfig1-dev libfreetype6-dev \
+            libx11-dev libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libvulkan-dev libegl1-mesa-dev
       - name: Install pinned Rust
-        shell: bash
-        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt,clippy
-      - name: Linux prerequisites
-        if: runner.os == 'Linux'
-        run: ./scripts/setup-linux.sh
-      - name: Configure Windows C++ compiler
-        if: runner.os == 'Windows'
-        shell: pwsh
+        run: rustup toolchain install 1.99.0 --profile minimal
+      - run: cargo build --release --locked -p vole-app -p vole-cli
+      - name: Package
         run: |
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (!$installation) { throw 'Visual Studio C++ tools were not found' }
-          $batch = Join-Path $installation 'VC\Auxiliary\Build\vcvars64.bat'
-          cmd /c "`"$batch`" >nul && set" | ForEach-Object {
-            if ($_ -match '^(Path|INCLUDE|LIB|LIBPATH|VCINSTALLDIR|VCToolsInstallDir|WindowsSdkDir|WindowsSDKVersion|UCRTVersion|UniversalCRTSdkDir|VSINSTALLDIR)=(.*)$') {
-              "$($matches[1])=$($matches[2])" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            }
-          }
-      - uses: actions/cache@v6.1.0
-        with:
-          path: target/toolchain
-          key: llvm-18.1.8-3b5b5c1-${{ matrix.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-toolchain.py') }}
-      - name: Build pinned toolchain
-        run: python scripts/build-toolchain.py --jobs 2 --clean-build
-      - name: Select the pinned toolchain for tests
-        shell: python
-        run: |
-          import os
-          from pathlib import Path
-          suffix = ".exe" if os.name == "nt" else ""
-          root = Path("target/toolchain/bin").resolve()
-          with open(os.environ["GITHUB_ENV"], "a") as output:
-              output.write(f"VOLE_LLVM_MC={root / ('llvm-mc' + suffix)}\n")
-              output.write(f"VOLE_LLD={root / ('ld.lld' + suffix)}\n")
-              output.write(f"VOLE_CLANG={root / ('clang' + suffix)}\n")
-      - name: Test every guest and native code
-        run: cargo test --workspace --locked
-      - name: Build native release
-        run: cargo build --release --locked -p vole-app -p vole-cli
-      - name: Bundle tools and notices; test every packaged guest
-        run: python scripts/package.py --toolchain-dir target/toolchain
-      - name: Capture actual Linux GPUI window
-        if: runner.os == 'Linux'
-        run: xvfb-run -a -s '-screen 0 1800x1200x24 -noreset' python scripts/verify-native.py --start-window-manager --start-compositor --binary dist/vole-*-linux-x64/vole
-      - uses: actions/upload-artifact@v7.0.1
-        with:
-          name: vole-native-${{ runner.os }}-${{ runner.arch }}
-          path: |
-            dist/*.tar.gz
-            dist/*.zip
-            dist/native-evidence
-          if-no-files-found: error
+          version="${TAG#v}"
+          out="dist/vole"
+          mkdir -p "$out/bin"
+          cp target/release/vole target/release/vole-cli "$out/bin/"
+          cp packaging/linux/vole.png "$out/vole.png"
+          for name in vole vole-cli; do
+            # Put Homebrew's keg LLVM and LLD first so desktop launches find them.
+            cat > "$out/$name" <<EOF
+          #!/bin/sh
+          here=\$(dirname "\$(readlink -f "\$0")")
+          prefix=\${here%/Caskroom/*}
+          PATH="\$prefix/opt/llvm/bin:\$prefix/opt/lld/bin:\$prefix/bin:\$PATH" exec "\$here/bin/$name" "\$@"
+          EOF
+            chmod +x "$out/$name"
+          done
+          # ponytail: assumes the default Linuxbrew prefix for the launcher path.
+          cat > "$out/dev.vole.Workbench.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=Vole
+          Comment=Assemble and simulate teaching machines
+          Exec=/home/linuxbrew/.linuxbrew/bin/vole
+          Icon=dev.vole.Workbench
+          Terminal=false
+          Categories=Development;Education;
+          StartupWMClass=dev.vole.Workbench
+          EOF
+          "$out/vole-cli" --help | head -1
+          tar -C dist -czf "dist/vole-$version-linux-x64.tar.gz" vole
+          sha256sum "dist/vole-$version-linux-x64.tar.gz"
+      - run: gh release upload "$TAG" dist/vole-*-linux-x64.tar.gz --clobber
