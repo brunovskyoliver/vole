@@ -11,9 +11,14 @@ permissions:
   contents: write
 jobs:
   # ponytail: macOS builds are made locally (make mac-build PROFILE=release);
-  # this only adds the Linux x64 tarball the Homebrew cask installs on Linux.
+  # this only adds the Linux tarballs the Homebrew cask installs on Linux.
   linux:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, arch: x64 }
+          - { runner: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
       TAG: ${{ inputs.tag || github.event.release.tag_name }}
@@ -62,6 +67,6 @@ jobs:
           StartupWMClass=dev.vole.Workbench
           EOF
           "$out/vole-cli" --help | head -1
-          tar -C dist -czf "dist/vole-$version-linux-x64.tar.gz" vole
-          sha256sum "dist/vole-$version-linux-x64.tar.gz"
-      - run: gh release upload "$TAG" dist/vole-*-linux-x64.tar.gz --clobber
+          tar -C dist -czf "dist/vole-$version-linux-${{ matrix.arch }}.tar.gz" vole
+          sha256sum "dist/vole-$version-linux-${{ matrix.arch }}.tar.gz"
+      - run: gh release upload "$TAG" dist/vole-*-linux-${{ matrix.arch }}.tar.gz --clobber
